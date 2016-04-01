@@ -62,7 +62,7 @@ void LTC6803_initialize();
 
 //! Function to start Cell Voltage measurement
 //! @return void
-void LTC6803_stcvad();
+void LTC6803_stcvdc();
 
 //! Function to start Temp channel voltage measurement
 //! @return void
@@ -89,7 +89,12 @@ void LTC6803_wrcfg(uint8_t total_ic,			//!< total_ic number of LTC6803 ICs in st
 //! Function that reads configuration of LTC6803-1/-3			   
 //! @returns  This function will return a 0 if there is no PEC error and will return -1 if there is a PEC error
 int8_t LTC6803_rdcfg(uint8_t total_ic, 			//!< total_ic number of LTC6803 ICs in stack
-					 uint8_t r_config[][7]		//!< The Function will put the read config register data into this array
+					 uint8_t rflg[][7]		//!< The Function will put the read config register data into this array
+					 );
+//! Function that reads flag register group of LTC6803-1/-3			   
+//! @returns  This function will return a 0 if there is no PEC error and will return -1 if there is a PEC error
+int8_t LTC6803_rdcfg(uint8_t total_ic, 			//!< total_ic number of LTC6803 ICs in stack
+					 uint8_t r_config[][7]		//!< The Function will put the flag register data into this array
 					 );
 //! Function that calculates PEC byte
 //! @returns The calculated CRC8

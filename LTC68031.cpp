@@ -62,6 +62,7 @@ Copyright 2015 Linear Technology Corp. (LTC)
 #include "LT_SPI.h"
 #include "LTC68031.h"
 #include <SPI.h>
+//#include <TimerOne.h>
 
 /***************************************************************************
 ***********6803 Functions***************************************************
@@ -132,7 +133,7 @@ int8_t LTC6803_rdcfg(uint8_t total_ic, //Number of ICs in the system
 
   //1
   cmd[0] = 0x02;
-  cmd[1] = 0xCE;
+  cmd[1] = 0xce;
 
 
   output_low(LTC6803_CS);
@@ -164,12 +165,58 @@ int8_t LTC6803_rdcfg(uint8_t total_ic, //Number of ICs in the system
 
 
 //Function to start Cell Voltage measurement
-void LTC6803_stcvad()
+void LTC6803_stcvdc()
 {
   output_low(LTC6803_CS);
-  spi_write(0x10);
-  spi_write(0xB0);
+  spi_write(0x70);
+  spi_write(0xE7);
   output_high(LTC6803_CS);
+}
+//Function to read register flag group
+int8_t LTC6803_RDFLG(uint8_t total_ic, //Number of ICs in the system
+                     uint8_t rflg[][7] //A two dimensional array that the function stores the read configuration data.
+                    )
+{
+  uint8_t BYTES_IN_REG = 3;
+
+  uint8_t cmd[2];
+  uint8_t *rx_data;
+  int8_t pec_error = 0;
+  uint8_t data_pec;
+  uint8_t received_pec;
+
+  rx_data = (uint8_t *) malloc((BYTES_IN_REG*total_ic)*sizeof(uint8_t));
+
+  //1
+  cmd[0] = 0x0C;
+  cmd[1] = 0xE4;
+
+
+  output_low(LTC6803_CS);
+  spi_write_read(cmd, 2, rx_data, (BYTES_IN_REG*total_ic));         //Read the configuration data of all ICs on the daisy chain into
+  output_high(LTC6803_CS);                          //rx_data[] array
+
+  for (uint8_t current_ic = 0; current_ic < total_ic; current_ic++)       //executes for each LTC6803 in the daisy chain and packs the data
+  {
+    //into the rflg array as well as check the received Config data
+    //for any bit errors
+    //4.a
+    for (uint8_t current_byte = 0; current_byte < BYTES_IN_REG; current_byte++)
+    {
+      rflg[current_ic][current_byte] = rx_data[current_byte + (current_ic*BYTES_IN_REG)];
+    }
+    //4.b
+    received_pec =  rflg[current_ic][6];
+    data_pec = pec8_calc(6, &rflg[current_ic][0]);
+    if (received_pec != data_pec)
+    {
+      pec_error = -1;
+    }
+  }
+
+  free(rx_data);
+  //5
+  return(pec_error);
 }
 
 
@@ -291,15 +338,10 @@ uint8_t LTC6803_rdcv( uint8_t total_ic, uint16_t cell_codes[][12])
   return(pec_error);
 }
 
-
-
 //Function that calculates PEC byte
 uint8_t pec8_calc(uint8_t len, uint8_t *data)
 {
-
   uint8_t  remainder = 0x41;//PEC_SEED;
-
-
   /*
    * Perform modulo-2 division, a byte at a time.
    */
@@ -309,7 +351,6 @@ uint8_t pec8_calc(uint8_t len, uint8_t *data)
      * Bring the next byte into the remainder.
      */
     remainder ^= data[byte];
-
     /*
      * Perform modulo-2 division, a bit at a time.
      */
@@ -328,12 +369,10 @@ uint8_t pec8_calc(uint8_t len, uint8_t *data)
       }
     }
   }
-
   /*
    * The final remainder is the CRC result.
    */
   return (remainder);
-
 }
 
 
