@@ -2,7 +2,7 @@
 /*requires the download of TimerOne-r11 from here: https://code.google.com/archive/p/arduino-timerone/downloads
 and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 
-//need to implement open wire detect every minute, if possible. 
+//TO DO: SET UP WATCHDOG ON NANO. INVOLVES NEW BOOTLOADER? 
 
 //Use functions from given library
 #include "LTC68031.h"
@@ -10,17 +10,13 @@ and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 #include <TimerOne.h>
 #include <math.h>
 
-//change both of these
-#define ICS 1
 const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
 
-byte PEC = 0x00;
 bool cfg_flag = false;
 bool cnt_flg = false;
-bool CAN_flg = false;
 bool sent = false;
 int counter = 0; //counter for timer. 
-int CT_value;
+int CT_value = 0;
 volatile int STATE = LOW;
 int error;
 
@@ -36,6 +32,8 @@ const int CAN_CS = 9;
 const int LTC6803_CS = 10;
 const float Beta = 4250000;
 const float rinf = 100000*exp(-1*(Beta/298.15));
+const int frequency = 20000;      //in uS for timer1
+const int OW_counter = 30/*seconds*/ *1000 /*ms*/ /(frequency) * 1000; //uS. 
 
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
@@ -49,8 +47,9 @@ const int CT_Sense = 0;
 const float balance = 2.67;      // Balance Voltage - at this voltage send CAN message to stop regen
 const float stopbalance = 2.6; // Voltage to stop balancing at
 const float OV = 2.8;           // Voltage to shut down TS at
+byte PEC = 0x00;
 
-uint16_t cell_codes[TOTAL_IC][12]; 
+uint16_t cell_codes[TOTAL_IC][12] = {2.7}; 
 /*!< 
   The cell codes will be stored in the cell_codes[][12] array in the following format:
   
@@ -59,7 +58,9 @@ uint16_t cell_codes[TOTAL_IC][12];
   |IC1 Cell 1        |IC1 Cell 2        |IC1 Cell 3        |    .....     |  IC1 Cell 12      |IC2 Cell 1         |IC2 Cell 2       | .....    |
 ****/
 
-uint16_t temp_codes[TOTAL_IC][3];
+float voltages[TOTAL_IC][12] = {0};
+
+uint16_t temp_codes[TOTAL_IC][3] = {0};
 /*!<
  The Temp codes will be stored in the temp_codes[][3] array in the following format:
  
@@ -67,7 +68,7 @@ uint16_t temp_codes[TOTAL_IC][3];
  |------------------|-----------------|-----------------|-----------------|-----------------|-----------|
  |IC1 Temp1         |IC1 Temp2        |IC1 ITemp        |IC2 Temp1        |IC2 Temp2        |  .....    |
 */
-float temps[TOTAL_IC][3];
+float temps[TOTAL_IC][3] = {0};
 
 uint8_t tx_cfg[TOTAL_IC][6];
 /*!<
@@ -93,10 +94,8 @@ uint8_t rx_cfg[TOTAL_IC][7];
 
 
 
-void init_cfg()                       // sets initial configuration for all ICs
-{
-  for(int i = 0; i<TOTAL_IC;i++)
-  {
+void init_cfg(){                       // sets initial configuration for all ICs
+  for(int i = 0; i<TOTAL_IC;i++){
     tx_cfg[i][0] = 0x91;
     tx_cfg[i][1] = 0x00 ; 
     tx_cfg[i][2] = 0x00 ;
@@ -106,70 +105,73 @@ void init_cfg()                       // sets initial configuration for all ICs
   }
 }
 
-void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(115200);
+void setup() {                         // No Serial connection at the moment. 
+  //Sets Arduino pin modes
   pinMode(CAN_int, INPUT);
-  pinMode(WD_Vis, OUTPUT);
   pinMode(WDT, INPUT);
   pinMode(Midpack, OUTPUT);
-  pinMode(HW_Enable, OUTPUT);
-  pinMode(AMS_Stat, OUTPUT);
-  pinMode(CAN_CS, OUTPUT);
-  pinMode(LTC6803_CS, OUTPUT);
-  Timer1.initialize(15000);
-  Timer1.attachInterrupt(timer_ISR);
-
   digitalWrite(Midpack, LOW);
-
+  pinMode(CAN_CS, OUTPUT);
+  digitalWrite(CAN_CS,HIGH);
+  pinMode(LTC6803_CS, OUTPUT);
+  digitalWrite(LTC6803_CS,HIGH);
+  
+  //Initialize timer for interrupt, counts time for CAN messages and OC detect. 
+  Timer1.initialize(frequency);                 //timer at set freq
+  Timer1.attachInterrupt(timer_ISR);
+  
   // ---Turn on LTC Chips---
+  pinMode(HW_Enable, OUTPUT);
   digitalWrite(HW_Enable, HIGH);
   delay(15);
-
   // ---Initialize LTC chips
-  LTC6803_initialize();               //Initialize LTC6803 hardware - sets SPI to 1MHz
+  LTC6803_initialize();                       //Initialize LTC6803 hardware - sets SPI to 1MHz
   init_cfg();
-  LTC6803_wrcfg(TOTAL_IC, tx_cfg);    //write cfg to chips
+  LTC6803_wrcfg(TOTAL_IC, tx_cfg);            //write cfg to chips
   error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);    //read back, set local copies to what was read.
-  errorcheck(error);
-  cfg_check();                        //sets tx = rx, ensures local copy is same as chip copy. 
+  errorcheck(error);                          //if PEC error, disable TS.
+  cfg_check();                                //sets tx = rx, ensures local copy is same as chip copy. 
 
   //Initialize CAN interface
   attachInterrupt(digitalPinToInterrupt(CAN_int),readFromCAN_ISR,FALLING);
+  //other initializations here
 
   //show ready to go
+  pinMode(AMS_Stat, OUTPUT);
   digitalWrite(AMS_Stat, HIGH);
+  pinMode(WD_Vis, OUTPUT);
   digitalWrite(WD_Vis, LOW);
   Timer1.start();
 }
 
 void loop() {
+  //-----start conversions, if statement for regular or open wire----
   if(!cnt_flg){
-    LTC6803_stcvdc(); //start cv conversion
+    LTC6803_stcvdc();     //start cv conversion
   } 
   else {
-    LTC6803_stowdc(); //START OPEN WIRE CONVERSION
+    LTC6803_stowdc();     //START OPEN WIRE CONVERSION
     cnt_flg = false;
   }
   LTC6803_sttmpad();      //start temp conversion
-  sent = true;
+  sent = true;            //sets flag to count down time while LTC chip is processing.
+   
   //----Read TS Current ----
   CT_value = analogRead(CT_Sense);
   TS_current = (CT_value - Offset)/Gain;
   if(digitalRead(WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
+    digitalWrite(WD_Vis, HIGH);
   }
-  while(sent){};                                //burns time for conversion
-  error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
-  errorcheck(error);
-  error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
-  errorcheck(error);
+
+  /*These work one iteration behind on data - this is to burn as little time as possible. 
+  Can be placed below receiving new data for "proper" ness but it won't be as fast
+  due to floating point math happening*/
   VoltageFix();
   OVCheck();
   StopBal();
   VoltToTemp();                                 // gets temperatures, stores in temps array
-
-  //----Adjust registers if applicable----
+  //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
     error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);  
@@ -177,11 +179,15 @@ void loop() {
     cfg_check();                                //read back, set local copies to what was read.
     cfg_flag = false;
   }
-    
-  if(CAN_flg){            //SEND CAN message
-    
-    CAN_flg = false;
-  }
+  
+  //burns any remaining time for conversion
+  while(sent){};                                
+  //actually receiving data from cell stack.
+  error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
+  errorcheck(error);
+  error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
+  errorcheck(error);
+
   //report cell voltage, temp, and CT values over CAN?
   
 }
@@ -190,8 +196,7 @@ void timer_ISR(){
   Timer1.stop();
   counter++;
   sent = false;
-  CAN_flg = true;       //for sending CAN message
-  if(counter >= 2000){ //every 30 seconds do Open Wire detect
+  if(counter >= OW_counter){ //every 30 seconds do Open Wire detect
     cnt_flg = true;
     counter = 0;
   }
@@ -207,16 +212,22 @@ void VoltToTemp(){
       // our setup has no thermistors on IC 2 (the middle one) and only one on IC 1 (bottom of stack) 
       if(ic_counter == 1 && cell_counter !=2){
         temps[ic_counter][cell_counter] = 0;
-        break;
+        continue;
       }
       if(ic_counter == 0 && cell_counter == 1){
         temps[ic_counter][cell_counter] = 0;
-        break;
+        continue;
+      }
+      if(cell_counter == 2){ //internal temps are measured differently
+        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*1.5/8) - 273.15;
+        continue; 
       }
       //figure out how to do this with integer math?
-      temps[ic_counter][cell_counter] = 100000*temp_codes[ic_counter][cell_counter];//(5-temp_codes[ic_counter][cell_counter])) //voltage to resistance, Ohms
-      temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]/rinf));
+      temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*.0015);  //weird scaling to proper voltage
+      temps[ic_counter][cell_counter]*=100000/(5-temp_codes[ic_counter][cell_counter]);       //voltage to resistance, Ohms
+      temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]/rinf));     //resistance to temp
     }
+    
   }
 }
 
@@ -235,13 +246,14 @@ void readFromCAN_ISR(){
   digitalWrite(Midpack,STATE);
 }
 
-//---- Take current into consideration to fix cell voltages---- 
+//---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
 void VoltageFix(){
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
   {
     for(int cell_counter = 0;cell_counter < 12;cell_counter++)
     {
-      cell_codes[ic_counter][cell_counter] = cell_codes[ic_counter][cell_counter] - ESR*TS_current;
+      voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter] - 512) *.0015;       //chip reports with an offset, this gets actual voltage
+      voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current;       // removes bias from TS current and series resistance of pack
     }
   }
 }
@@ -329,9 +341,9 @@ void OVCheck(){
   {
     for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
     {
-      if( cell_codes[ic_counter][cv_counter] * 0.0015 > balance)
+      if( voltages[ic_counter][cv_counter] * 0.0015 > balance)
       {
-        if( cell_codes[ic_counter][cv_counter] * 0.0015 > OV) //if need to shutdown tractive system due to OV.
+        if( voltages[ic_counter][cv_counter] * 0.0015 > OV) //if need to shutdown tractive system due to OV.
         {
           digitalWrite(AMS_Stat, LOW);
         }
@@ -355,7 +367,7 @@ void StopBal(){
   {
     for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
     {
-      if( cell_codes[ic_counter][cv_counter] * 0.0015 < stopbalance)
+      if( voltages[ic_counter][cv_counter] * 0.0015 < stopbalance)
       {
         if(cv_counter < 8 && ((tx_cfg[ic_counter][1] & DCC_cell(cv_counter)) == 0))
         {
