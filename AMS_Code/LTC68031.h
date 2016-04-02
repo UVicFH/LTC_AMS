@@ -64,6 +64,9 @@ void LTC6803_initialize();
 //! @return void
 void LTC6803_stcvdc();
 
+//Function to start Open Wire Cell Voltage measurement
+void LTC6803_stowdc();
+
 //! Function to start Temp channel voltage measurement
 //! @return void
 void LTC6803_sttmpad();

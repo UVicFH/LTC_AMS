@@ -2,10 +2,12 @@
 /*requires the download of TimerOne-r11 from here: https://code.google.com/archive/p/arduino-timerone/downloads
 and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 
+//need to implement open wire detect every minute, if possible. 
+
 //Use functions from given library
 #include "LTC68031.h"
 #include "mcp_can.h"
-//#include <TimerOne.h>
+#include <TimerOne.h>
 #include <math.h>
 
 //change both of these
@@ -14,6 +16,9 @@ const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
 
 byte PEC = 0x00;
 bool cfg_flag = false;
+bool cnt_flg = false;
+bool CAN_flg = false;
+int counter = 0; //counter for timer. 
 int CT_value;
 volatile int STATE = LOW;
 int error;
@@ -30,6 +35,7 @@ const int CAN_CS = 9;
 const int LTC6803_CS = 10;
 const float Beta = 4250000;
 const float rinf = 100000*exp(-1*(Beta/298.15));
+
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
 const float Gain = .004;         // for current transducer, in V/A
@@ -38,7 +44,7 @@ float TS_current;
 const float ESR = .004;            // ESR of the pack. Need to change this. 
 //analog pin
 const int CT_Sense = 0;
-//LT constants
+//----LT constants----
 const float balance = 2.67;      // Balance Voltage - at this voltage send CAN message to stop regen
 const float stopbalance = 2.6; // Voltage to stop balancing at
 const float OV = 2.8;           // Voltage to shut down TS at
@@ -110,6 +116,8 @@ void setup() {
   pinMode(AMS_Stat, OUTPUT);
   pinMode(CAN_CS, OUTPUT);
   pinMode(LTC6803_CS, OUTPUT);
+  Timer1.initialize(30000);
+  Timer1.attachInterrupt(timer_ISR);
 
   digitalWrite(Midpack, LOW);
 
@@ -131,11 +139,11 @@ void setup() {
   //show ready to go
   digitalWrite(AMS_Stat, HIGH);
   digitalWrite(WD_Vis, LOW);
+  Timer1.start();
 }
 
 void loop() {
-  if(digitalRead(WDT) == LOW)
-  {
+  if(digitalRead(WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
   }
   //----Read TS Current ----
@@ -143,8 +151,7 @@ void loop() {
   TS_current = (CT_value - Offset)/Gain;
 
   //----Adjust registers if applicable----
-  if(cfg_flag)
-  {
+  if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
     error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);  //read back, set local copies to what was read.
     errorcheck(error);
@@ -153,8 +160,15 @@ void loop() {
   }
   
   //----Read Cell Voltage----
-  LTC6803_stcvdc(); //start cv conversion
-  delay(25);
+  if(!cnt_flg){
+    LTC6803_stcvdc(); //start cv conversion
+  } 
+  else {
+    LTC6803_stowdc(); //START OPEN WIRE CONVERSION
+    cnt_flg = false;
+  }
+  LTC6803_sttmpad();      //start temp conversion
+  delay(15); //conversion delay
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);
   errorcheck(error);
   VoltageFix();
@@ -162,15 +176,28 @@ void loop() {
   StopBal();
 
   //----Read temperatures----
-  LTC6803_sttmpad(); //start temp conversion
-  delay(25);
   LTC6803_rdtmp(TOTAL_IC, temp_codes); //read temps
-  VoltToTemp(); // gets temperatures, stores in temps array
+  VoltToTemp();           // gets temperatures, stores in temps array
   
-  
+  if(CAN_flg){            //SEND CAN message
+    
+    CAN_flg = false;
+  }
   //report cell voltage, temp, and CT values over CAN?
   
 }
+
+void timer_ISR(){
+  Timer1.stop();
+  counter++;
+  CAN_flg = true;       //for sending CAN message
+  if(counter >= 1000){ //every 30 seconds do Open Wire detect
+    cnt_flg = true;
+    counter = 0;
+  }
+  Timer1.start();
+}
+
 // takes voltages from temp readings, turns them into actual temps
 void VoltToTemp(){
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)

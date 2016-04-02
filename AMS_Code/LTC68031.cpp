@@ -168,10 +168,21 @@ int8_t LTC6803_rdcfg(uint8_t total_ic, //Number of ICs in the system
 void LTC6803_stcvdc()
 {
   output_low(LTC6803_CS);
-  spi_write(0x70);
+  spi_write(0x60);
   spi_write(0xE7);
   output_high(LTC6803_CS);
 }
+
+
+//Function to start Open Wire Cell Voltage measurement
+void LTC6803_stowdc()
+{
+  output_low(LTC6803_CS);
+  spi_write(0x70);
+  spi_write(0x97);
+  output_high(LTC6803_CS);
+}
+
 //Function to read register flag group
 int8_t LTC6803_RDFLG(uint8_t total_ic, //Number of ICs in the system
                      uint8_t rflg[][7] //A two dimensional array that the function stores the read configuration data.
