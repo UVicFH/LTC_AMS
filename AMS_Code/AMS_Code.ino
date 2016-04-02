@@ -18,6 +18,7 @@ byte PEC = 0x00;
 bool cfg_flag = false;
 bool cnt_flg = false;
 bool CAN_flg = false;
+bool sent = false;
 int counter = 0; //counter for timer. 
 int CT_value;
 volatile int STATE = LOW;
@@ -116,14 +117,14 @@ void setup() {
   pinMode(AMS_Stat, OUTPUT);
   pinMode(CAN_CS, OUTPUT);
   pinMode(LTC6803_CS, OUTPUT);
-  Timer1.initialize(30000);
+  Timer1.initialize(15000);
   Timer1.attachInterrupt(timer_ISR);
 
   digitalWrite(Midpack, LOW);
 
   // ---Turn on LTC Chips---
   digitalWrite(HW_Enable, HIGH);
-  delay(25);
+  delay(15);
 
   // ---Initialize LTC chips
   LTC6803_initialize();               //Initialize LTC6803 hardware - sets SPI to 1MHz
@@ -143,23 +144,6 @@ void setup() {
 }
 
 void loop() {
-  if(digitalRead(WDT) == LOW){
-    digitalWrite(AMS_Stat, LOW);
-  }
-  //----Read TS Current ----
-  CT_value = analogRead(CT_Sense);
-  TS_current = (CT_value - Offset)/Gain;
-
-  //----Adjust registers if applicable----
-  if(cfg_flag){
-    LTC6803_wrcfg(TOTAL_IC, tx_cfg);
-    error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);  //read back, set local copies to what was read.
-    errorcheck(error);
-    cfg_check();
-    cfg_flag = false;
-  }
-  
-  //----Read Cell Voltage----
   if(!cnt_flg){
     LTC6803_stcvdc(); //start cv conversion
   } 
@@ -168,17 +152,32 @@ void loop() {
     cnt_flg = false;
   }
   LTC6803_sttmpad();      //start temp conversion
-  delay(15); //conversion delay
-  error = LTC6803_rdcv(TOTAL_IC, cell_codes);
+  sent = true;
+  //----Read TS Current ----
+  CT_value = analogRead(CT_Sense);
+  TS_current = (CT_value - Offset)/Gain;
+  if(digitalRead(WDT) == LOW){
+    digitalWrite(AMS_Stat, LOW);
+  }
+  while(sent){};                                //burns time for conversion
+  error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
+  errorcheck(error);
+  error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
   errorcheck(error);
   VoltageFix();
   OVCheck();
   StopBal();
+  VoltToTemp();                                 // gets temperatures, stores in temps array
 
-  //----Read temperatures----
-  LTC6803_rdtmp(TOTAL_IC, temp_codes); //read temps
-  VoltToTemp();           // gets temperatures, stores in temps array
-  
+  //----Adjust registers if applicable----
+  if(cfg_flag){
+    LTC6803_wrcfg(TOTAL_IC, tx_cfg);
+    error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);  
+    errorcheck(error);
+    cfg_check();                                //read back, set local copies to what was read.
+    cfg_flag = false;
+  }
+    
   if(CAN_flg){            //SEND CAN message
     
     CAN_flg = false;
@@ -190,8 +189,9 @@ void loop() {
 void timer_ISR(){
   Timer1.stop();
   counter++;
+  sent = false;
   CAN_flg = true;       //for sending CAN message
-  if(counter >= 1000){ //every 30 seconds do Open Wire detect
+  if(counter >= 2000){ //every 30 seconds do Open Wire detect
     cnt_flg = true;
     counter = 0;
   }
