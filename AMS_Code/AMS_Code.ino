@@ -30,7 +30,7 @@ const int HW_Enable = 6;
 const int AMS_Stat = 7;
 const int CAN_CS = 9;
 const int LTC6803_CS = 10;
-const int Beta = 4250000;
+const int Beta = 4250;
 const int rinf = 64; // in milliohms//100000*exp(-1*(Beta/298.15));
 const int freq = 20000;      //in uS for timer1
 const int OW_counter = 30/*seconds*/ *1000 /*ms*/ /freq * 1000; //uS. 
@@ -54,7 +54,7 @@ const int stopbalance = 2600;    // Voltage (mV) to stop balancing at, can start
 const int OV = 2800;             // Voltage (mV) to shut down TS at
 byte PEC = 0x00;
 
-uint16_t cell_codes[TOTAL_IC][12] = {2.7}; 
+uint16_t cell_codes[TOTAL_IC][12] = {2}; 
 /*!< 
   The cell codes will be stored in the cell_codes[][12] array in the following format:
   
@@ -63,7 +63,7 @@ uint16_t cell_codes[TOTAL_IC][12] = {2.7};
   |IC1 Cell 1        |IC1 Cell 2        |IC1 Cell 3        |    .....     |  IC1 Cell 12      |IC2 Cell 1         |IC2 Cell 2       | .....    |
 ****/
 
-float voltages[TOTAL_IC][12] = {0};
+int voltages[TOTAL_IC][12] = {0};
 
 uint16_t temp_codes[TOTAL_IC][3] = {0};
 /*!<
@@ -73,7 +73,7 @@ uint16_t temp_codes[TOTAL_IC][3] = {0};
  |------------------|-----------------|-----------------|-----------------|-----------------|-----------|
  |IC1 Temp1         |IC1 Temp2        |IC1 ITemp        |IC2 Temp1        |IC2 Temp2        |  .....    |
 */
-float temps[TOTAL_IC][3] = {0};
+int temps[TOTAL_IC][3] = {0};
 
 uint8_t tx_cfg[TOTAL_IC][6];
 /*!<
@@ -146,7 +146,7 @@ void setup() {                         // No Serial connection at the moment.
   digitalWrite(AMS_Stat, HIGH);
   pinMode(WD_Vis, OUTPUT);
   digitalWrite(WD_Vis, LOW);
-  Timer1.start();
+
 }
 
 void loop() {
@@ -160,7 +160,7 @@ void loop() {
   }
   LTC6803_sttmpad();      //start temp conversion
   sent = true;            //sets flag to count down time while LTC chip is processing.
-  // had thoughts about this, what if the ISR clears immediately?
+  Timer1.start();         //setting the timer here removes the possibility of sent being set to false right away. 
    
   //----Read TS Current ----
   CT_value = analogRead(CT_Sense);
@@ -231,10 +231,9 @@ void VoltToTemp(){
         temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*3/16) - 273;
         continue; 
       }
-      //figure out how to do this with integer math?
-      temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*15/1000);  //weird scaling to proper voltage
-      temps[ic_counter][cell_counter]*=100000/(5-temp_codes[ic_counter][cell_counter]);       //voltage to resistance, Ohms
-      temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]/(rinf*1000)));     //resistance to temp
+      temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*15/1000);       //weird scaling to proper voltage
+      temps[ic_counter][cell_counter]*=100000/(5-temps[ic_counter][cell_counter]);               //voltage to resistance, Ohms
+      temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]*1000/(rinf)));      //resistance to temp
     }
     
   }
@@ -350,9 +349,9 @@ void OVCheck(){
   {
     for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
     {
-      if( voltages[ic_counter][cv_counter] > balance)
+      if( (voltages[ic_counter][cv_counter] * 1000) > balance)
       {
-        if( voltages[ic_counter][cv_counter] > OV) //if need to shutdown tractive system due to OV.
+        if( (voltages[ic_counter][cv_counter]*1000) > OV) //if need to shutdown tractive system due to OV.
         {
           digitalWrite(AMS_Stat, LOW);
         }
@@ -376,7 +375,7 @@ void StopBal(){
   {
     for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
     {
-      if( voltages[ic_counter][cv_counter] < stopbalance)
+      if( (voltages[ic_counter][cv_counter] * 1000) < stopbalance)
       {
         if(cv_counter < 8 && ((tx_cfg[ic_counter][1] & DCC_cell(cv_counter)) == 0))
         {
