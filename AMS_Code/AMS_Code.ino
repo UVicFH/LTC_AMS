@@ -31,22 +31,27 @@ const int AMS_Stat = 7;
 const int CAN_CS = 9;
 const int LTC6803_CS = 10;
 const int Beta = 4250000;
-const float rinf = 64; // in milliohms//100000*exp(-1*(Beta/298.15));
+const int rinf = 64; // in milliohms//100000*exp(-1*(Beta/298.15));
 const int freq = 20000;      //in uS for timer1
 const int OW_counter = 30/*seconds*/ *1000 /*ms*/ /freq * 1000; //uS. 
 
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
-const float Gain = .004;         // for current transducer, in V/A
-const float Offset = 2.5;        // 0 current offset, allows measurement in both directions. 
-float TS_current;
-const float ESR = 4;            // ESR of the pack. Need to change this. 
+//const float Gain = .004;         // for current transducer, in V/A
+const int inv_Gain = 250;         // *250 = /.004
+const int Offset = 512;        // 0 current offset, allows measurement in both directions. 
+//float TS_current;
+int TS_current;
+const int ESR = 4;            // ESR of the entire pack. Need to change this. 
 //analog pin
 const int CT_Sense = 0;
 //----LT constants----
-const float balance = 2.67;      // Balance Voltage - at this voltage send CAN message to stop regen
-const float stopbalance = 2.6; // Voltage to stop balancing at
-const float OV = 2.8;           // Voltage to shut down TS at
+//const float balance = 2.67;      // Balance Voltage - at this voltage send CAN message to stop regen
+const int balance = 2670;         // Balance Voltage (mV) - at this voltage send CAN message to stop regen
+//const float stopbalance = 2.6;    // Voltage to stop balancing at, can start regen again
+const int stopbalance = 2600;    // Voltage (mV) to stop balancing at, can start regen again
+//const float OV = 2.8;             // Voltage to shut down TS at
+const int OV = 2800;             // Voltage (mV) to shut down TS at
 byte PEC = 0x00;
 
 uint16_t cell_codes[TOTAL_IC][12] = {2.7}; 
@@ -159,7 +164,7 @@ void loop() {
    
   //----Read TS Current ----
   CT_value = analogRead(CT_Sense);
-  TS_current = (CT_value - Offset)/Gain;
+  TS_current = (CT_value - Offset) * inv_Gain;
   if(digitalRead(WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
     digitalWrite(WD_Vis, HIGH);
