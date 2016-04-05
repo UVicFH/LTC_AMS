@@ -2,8 +2,11 @@
 /*requires the download of TimerOne-r11 from here: https://code.google.com/archive/p/arduino-timerone/downloads
 and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 
-//TO DO: SET UP WATCHDOG ON NANO. INVOLVES NEW BOOTLOADER? 
+/*TO DO: 
+ * SET UP WATCHDOG ON NANO. INVOLVES NEW BOOTLOADER? 
+ * SET UP CAN ID
 
+*/
 //Use functions from given library
 #include "LTC68031.h"
 #include "mcp_can.h"
@@ -15,6 +18,7 @@ const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
 bool cfg_flag = false;
 bool cnt_flg = false;
 bool sent = false;
+bool voltflag = false;
 int counter = 0; //counter for timer. 
 int CT_value = 0;
 volatile int STATE = LOW;
@@ -33,7 +37,8 @@ const int LTC6803_CS = 10;
 const int Beta = 4250;
 const int rinf = 64; // in milliohms//100000*exp(-1*(Beta/298.15));
 const int freq = 20000;      //in uS for timer1
-const int OW_counter = 30/*seconds*/ *1000 /*ms*/ /freq * 1000; //uS. 
+const int OW_counter = 5/*seconds*/ *1000 /*ms*/ /freq * 1000; //uS
+unsigned long millistime; 
 
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
@@ -45,14 +50,22 @@ int TS_current;
 const int ESR = 4;            // ESR of the entire pack. Need to change this. 
 //analog pin
 const int CT_Sense = 0;
+
 //----LT constants----
 //const float balance = 2.67;      // Balance Voltage - at this voltage send CAN message to stop regen
-const int balance = 2670;         // Balance Voltage (mV) - at this voltage send CAN message to stop regen
+const int balance = 3670;         // Balance Voltage (mV) - at this voltage send CAN message to stop regen
 //const float stopbalance = 2.6;    // Voltage to stop balancing at, can start regen again
-const int stopbalance = 2600;    // Voltage (mV) to stop balancing at, can start regen again
+const int stopbalance = 3600;    // Voltage (mV) to stop balancing at, can start regen again
 //const float OV = 2.8;             // Voltage to shut down TS at
-const int OV = 2800;             // Voltage (mV) to shut down TS at
+const int OV = 3800;             // Voltage (mV) to shut down TS at
 byte PEC = 0x00;
+
+//----CAN SHIELD STUFF----
+MCP_CAN CAN(CAN_CS);
+unsigned char inFromCAN[8];
+unsigned char len = 0;
+unsigned long canID;
+const unsigned long DEVICE_ID = 0x56;     // change me!
 
 uint16_t cell_codes[TOTAL_IC][12] = {2}; 
 /*!< 
@@ -63,7 +76,7 @@ uint16_t cell_codes[TOTAL_IC][12] = {2};
   |IC1 Cell 1        |IC1 Cell 2        |IC1 Cell 3        |    .....     |  IC1 Cell 12      |IC2 Cell 1         |IC2 Cell 2       | .....    |
 ****/
 
-int voltages[TOTAL_IC][12] = {0};
+uint16_t voltages[TOTAL_IC][12] = {0};
 
 uint16_t temp_codes[TOTAL_IC][3] = {0};
 /*!<
@@ -73,7 +86,7 @@ uint16_t temp_codes[TOTAL_IC][3] = {0};
  |------------------|-----------------|-----------------|-----------------|-----------------|-----------|
  |IC1 Temp1         |IC1 Temp2        |IC1 ITemp        |IC2 Temp1        |IC2 Temp2        |  .....    |
 */
-int temps[TOTAL_IC][3] = {0};
+uint16_t temps[TOTAL_IC][3] = {0};
 
 uint8_t tx_cfg[TOTAL_IC][6];
 /*!<
@@ -111,6 +124,7 @@ void init_cfg(){                       // sets initial configuration for all ICs
 }
 
 void setup() {                         // No Serial connection at the moment. 
+  Serial.begin(115200);
   //Sets Arduino pin modes
   pinMode(CAN_int, INPUT);
   pinMode(WDT, INPUT);
@@ -122,8 +136,8 @@ void setup() {                         // No Serial connection at the moment.
   digitalWrite(LTC6803_CS,HIGH);
   
   //Initialize timer for interrupt, counts time for CAN messages and OC detect. 
-  Timer1.initialize(freq);                 //timer at set freq
-  Timer1.attachInterrupt(timer_ISR);
+  //Timer1.initialize(freq);                 //timer at set freq
+  //Timer1.attachInterrupt(timer_ISR);
   
   // ---Turn on LTC Chips---
   pinMode(HW_Enable, OUTPUT);
@@ -138,7 +152,19 @@ void setup() {                         // No Serial connection at the moment.
   cfg_check();                                //sets tx = rx, ensures local copy is same as chip copy. 
 
   //Initialize CAN interface
-  attachInterrupt(digitalPinToInterrupt(CAN_int),readFromCAN_ISR,FALLING);
+  // no interrupt atm, just poll for new data
+  //attachInterrupt(digitalPinToInterrupt(CAN_int),readFromCAN_ISR,FALLING);
+
+  /*
+  while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
+    {
+        //Serial.println("CAN BUS Shield init fail");
+        //Serial.println(" Init CAN BUS Shield again");
+        //delay(100);
+    }
+  //Serial.println("CAN BUS Shield init ok!");
+  */
+  
   //other initializations here
 
   //show ready to go
@@ -150,7 +176,6 @@ void setup() {                         // No Serial connection at the moment.
 }
 
 void loop() {
-  //-----start conversions, if statement for regular or open wire----
   if(!cnt_flg){
     LTC6803_stcvdc();     //start cv conversion
   } 
@@ -160,9 +185,12 @@ void loop() {
   }
   LTC6803_sttmpad();      //start temp conversion
   sent = true;            //sets flag to count down time while LTC chip is processing.
-  Timer1.start();         //setting the timer here removes the possibility of sent being set to false right away. 
+  millistime = millis();
+  //Timer1.start();         //setting the timer here removes the possibility of sent being set to false right away. 
    
   //----Read TS Current ----
+
+  /*
   CT_value = analogRead(CT_Sense);
   TS_current = (CT_value - Offset) * inv_Gain;
   if(digitalRead(WDT) == LOW){
@@ -170,13 +198,27 @@ void loop() {
     digitalWrite(WD_Vis, HIGH);
   }
 
+  */
+
   /*These work one iteration behind on data - this is to burn as little time as possible. 
   Can be placed below receiving new data for "proper" ness but it won't be as fast
   due to floating point math happening*/
   VoltageFix();
+  Serial.print("Voltages (mV): ");
+  for(int i = 0; i<4; i++){
+    Serial.print(voltages[0][i]);
+    Serial.print(" ");
+  }
+  Serial.print("\n");
   OVCheck();
+  //Serial.println("through OVCHeck");
+  if(voltflag){ //tells MABX TO STOP REGEN UNTIL BALANCED AGAIN
+    //set something here to then send over CAN?
+  }
   StopBal();
-  VoltToTemp();                                 // gets temperatures, stores in temps array
+  //Serial.println("through StopBal");
+  VoltToTemp();  
+  //Serial.println("PAssed VTT");// gets temperatures, stores in temps array
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -185,18 +227,41 @@ void loop() {
     cfg_check();                                //read back, set local copies to what was read.
     cfg_flag = false;
   }
-  //report cell voltage, temp, and CT values over CAN?
-
+  //Serial.println("Passed cfgset");
+  // check for CAN data
+  len = 0;
+  /*(CAN_MSGAVAIL == CAN.checkReceive()){
+        CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
+        canID = CAN.getCanId();
+    }
+  //sets midpack relay on for charging
+  if(canID == DEVICE_ID){
+    if(inFromCAN == 1){
+      digitalWrite(Midpack, HIGH);
+    }
+    if(inFromCAN != 1){
+      digitalWrite(Midpack, LOW);
+    }
+  }
+*/
 
   
+  //report cell voltage, temp, and CT values over CAN?
+  
+  
   //burns any remaining time for conversion
-  while(sent){};                                
+  while(millis()-millistime > 15){
+    //Serial.println("Inside Wait");
+  }
+
+  //Serial.println("AfterWhileloop");                                
   //actually receiving data from cell stack.
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
   errorcheck(error);
+  //Serial.println("AFter cell voltages");
   error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
   errorcheck(error);
-
+  //Serial.println("After temp voltages");
 
   
 }
@@ -235,7 +300,6 @@ void VoltToTemp(){
       temps[ic_counter][cell_counter]*=100000/(5-temps[ic_counter][cell_counter]);               //voltage to resistance, Ohms
       temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]*1000/(rinf)));      //resistance to temp
     }
-    
   }
 }
 
@@ -246,22 +310,23 @@ inline void errorcheck(int error){
       digitalWrite(AMS_Stat, LOW);
     }
 }
+//not necessary at the moment
+/*
 void readFromCAN_ISR(){
   //enter code to turn on halfpack relay
 
   //obviously a work in progress
   STATE = !STATE;
-  digitalWrite(Midpack,STATE);
 }
-
+*/
 //---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
 void VoltageFix(){
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
   {
     for(int cell_counter = 0;cell_counter < 12;cell_counter++)
     {
-      voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter] - 512) *15/1000;       //chip reports with an offset, this gets actual voltage
-      voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
+      voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter]) *15/10;       //chip reports with an offset, this gets actual voltage (mV)
+      //voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
     }
   }
 }
@@ -349,9 +414,10 @@ void OVCheck(){
   {
     for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
     {
-      if( (voltages[ic_counter][cv_counter] * 1000) > balance)
+      if( voltages[ic_counter][cv_counter] > balance)
       {
-        if( (voltages[ic_counter][cv_counter]*1000) > OV) //if need to shutdown tractive system due to OV.
+        voltflag = true;
+        if( voltages[ic_counter][cv_counter] > OV) //if need to shutdown tractive system due to OV.
         {
           digitalWrite(AMS_Stat, LOW);
         }
@@ -375,8 +441,9 @@ void StopBal(){
   {
     for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
     {
-      if( (voltages[ic_counter][cv_counter] * 1000) < stopbalance)
-      {
+      if( voltages[ic_counter][cv_counter] < stopbalance)
+      { 
+        Serial.println("Stop Balancing");
         if(cv_counter < 8 && ((tx_cfg[ic_counter][1] & DCC_cell(cv_counter)) == 0))
         {
           tx_cfg[ic_counter][1] = tx_cfg[ic_counter][1] ^ DCC_cell(cv_counter);
