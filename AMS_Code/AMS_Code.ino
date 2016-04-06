@@ -16,10 +16,7 @@ and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
 
 bool cfg_flag = false;
-bool cnt_flg = false;
-bool sent = false;
 bool voltflag = false;
-int counter = 0; //counter for timer. 
 int CT_value = 0;
 volatile int STATE = LOW;
 int error;
@@ -36,9 +33,8 @@ const int CAN_CS = 9;
 const int LTC6803_CS = 10;
 const int Beta = 4250;
 const int rinf = 64; // in milliohms//100000*exp(-1*(Beta/298.15));
-const int freq = 20000;      //in uS for timer1
-const int OW_counter = 5/*seconds*/ *1000 /*ms*/ /freq * 1000; //uS
 unsigned long millistime; 
+unsigned long OWTime;
 
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
@@ -172,22 +168,22 @@ void setup() {                         // No Serial connection at the moment.
   digitalWrite(AMS_Stat, HIGH);
   pinMode(WD_Vis, OUTPUT);
   digitalWrite(WD_Vis, LOW);
+  millistime = millis();
+  OWTime = millistime;
 
 }
 
 void loop() {
-  if(!cnt_flg){
-    LTC6803_stcvdc();     //start cv conversion
+  //----OpenWire detect?----
+  if(millis() - OWTime >=1000){
+    LTC6803_stowdc();     //START OPEN WIRE CONVERSION
+    OWTime = millis();
   } 
   else {
-    LTC6803_stowdc();     //START OPEN WIRE CONVERSION
-    cnt_flg = false;
+    LTC6803_stcvdc();     //start cv conversion
   }
   LTC6803_sttmpad();      //start temp conversion
-  sent = true;            //sets flag to count down time while LTC chip is processing.
   millistime = millis();
-  //Timer1.start();         //setting the timer here removes the possibility of sent being set to false right away. 
-   
   //----Read TS Current ----
 
   /*
@@ -204,21 +200,11 @@ void loop() {
   Can be placed below receiving new data for "proper" ness but it won't be as fast
   due to floating point math happening*/
   VoltageFix();
-  Serial.print("Voltages (mV): ");
-  for(int i = 0; i<4; i++){
-    Serial.print(voltages[0][i]);
-    Serial.print(" ");
-  }
-  Serial.print("\n");
   OVCheck();
-  //Serial.println("through OVCHeck");
-  if(voltflag){ //tells MABX TO STOP REGEN UNTIL BALANCED AGAIN
-    //set something here to then send over CAN?
-  }
   StopBal();
-  //Serial.println("through StopBal");
-  VoltToTemp();  
-  //Serial.println("PAssed VTT");// gets temperatures, stores in temps array
+  VoltToTemp();
+  Serial.println(temps[0][2]);  
+  // gets temperatures, stores in temps array
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -227,7 +213,6 @@ void loop() {
     cfg_check();                                //read back, set local copies to what was read.
     cfg_flag = false;
   }
-  //Serial.println("Passed cfgset");
   // check for CAN data
   len = 0;
   /*(CAN_MSGAVAIL == CAN.checkReceive()){
@@ -250,31 +235,14 @@ void loop() {
   
   
   //burns any remaining time for conversion
-  while(millis()-millistime > 15){
+  while(millis()-millistime > 18){
     //Serial.println("Inside Wait");
-  }
-
-  //Serial.println("AfterWhileloop");                                
+  }                              
   //actually receiving data from cell stack.
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
   errorcheck(error);
-  //Serial.println("AFter cell voltages");
   error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
   errorcheck(error);
-  //Serial.println("After temp voltages");
-
-  
-}
-
-void timer_ISR(){
-  Timer1.stop();
-  counter++;
-  sent = false;
-  if(counter >= OW_counter){ //every 30 seconds do Open Wire detect
-    cnt_flg = true;
-    counter = 0;
-  }
-  Timer1.start();
 }
 
 // takes voltages from temp readings, turns them into actual temps
@@ -289,14 +257,14 @@ void VoltToTemp(){
         continue;
       }
       if(ic_counter == 0 && cell_counter == 1){
-        temps[ic_counter][cell_counter] = 0;
+        //temps[ic_counter][cell_counter] = 0;
         continue;
       }
       if(cell_counter == 2){ //internal temps are measured differently
-        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*3/16) - 273;
+        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*3/16) - 273;
         continue; 
       }
-      temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter] - 512)*15/1000);       //weird scaling to proper voltage
+      temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter]));       //weird scaling to proper voltage
       temps[ic_counter][cell_counter]*=100000/(5-temps[ic_counter][cell_counter]);               //voltage to resistance, Ohms
       temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]*1000/(rinf)));      //resistance to temp
     }
@@ -307,18 +275,11 @@ void VoltToTemp(){
 inline void errorcheck(int error){
   if(error != 0)
     {
+      Serial.println("PEC ERROR");
       digitalWrite(AMS_Stat, LOW);
     }
 }
-//not necessary at the moment
-/*
-void readFromCAN_ISR(){
-  //enter code to turn on halfpack relay
 
-  //obviously a work in progress
-  STATE = !STATE;
-}
-*/
 //---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
 void VoltageFix(){
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
@@ -387,21 +348,21 @@ uint8_t getHEX(uint8_t input){
 uint8_t DCC_cell(uint8_t input){
   switch(input)
   {
-  case 1:
+  case 0:
   return 0b00000001;
-  case 2:
+  case 1:
   return 0b00000010;
-  case 3:
+  case 2:
   return 0b00000100;
-  case 4:
+  case 3:
   return 0b00001000;
-  case 5: 
+  case 4: 
   return 0b00010000;
-  case 6:
+  case 5:
   return 0b00100000;
-  case 7:
+  case 6:
   return 0b01000000;
-  case 8:
+  case 7:
   return 0b10000000;
   default:
   return 0b0;
@@ -412,7 +373,7 @@ uint8_t DCC_cell(uint8_t input){
 void OVCheck(){
   for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) //Loop through all ICs
   {
-    for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
+    for(int cv_counter = 0;cv_counter < 4;cv_counter++) //Loop through all 
     {
       if( voltages[ic_counter][cv_counter] > balance)
       {
@@ -423,11 +384,11 @@ void OVCheck(){
         }
         if(cv_counter < 8)
         {
-          tx_cfg[ic_counter][1] = tx_cfg[ic_counter][1] | DCC_cell(cv_counter);
+          tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
           cfg_flag = true;
         }else
         {
-          tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] | DCC_cell(cv_counter - 8);
+          tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
           cfg_flag = true;
         }
       }
@@ -439,14 +400,13 @@ void OVCheck(){
 void StopBal(){
   for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) //Loop through all ICs
   {
-    for(int cv_counter = 0;cv_counter < 12;cv_counter++) //Loop through all 
+    for(int cv_counter = 0;cv_counter < 4;cv_counter++) //Loop through all cells
     {
-      if( voltages[ic_counter][cv_counter] < stopbalance)
+      if(voltages[ic_counter][cv_counter] <= stopbalance)
       { 
-        Serial.println("Stop Balancing");
-        if(cv_counter < 8 && ((tx_cfg[ic_counter][1] & DCC_cell(cv_counter)) == 0))
+        if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter)))
         {
-          tx_cfg[ic_counter][1] = tx_cfg[ic_counter][1] ^ DCC_cell(cv_counter);
+          tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
           cfg_flag = true;
         }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0))
         {
