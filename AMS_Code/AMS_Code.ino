@@ -236,7 +236,6 @@ void loop() {
   
   //burns any remaining time for conversion
   while(millis()-millistime > 18){
-    //Serial.println("Inside Wait");
   }                              
   //actually receiving data from cell stack.
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
@@ -261,7 +260,7 @@ void VoltToTemp(){
         continue;
       }
       if(cell_counter == 2){ //internal temps are measured differently
-        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*3/16) - 273;
+        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*3/16)-273;
         continue; 
       }
       temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter]));       //weird scaling to proper voltage
