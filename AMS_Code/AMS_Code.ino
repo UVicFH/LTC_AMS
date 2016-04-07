@@ -17,6 +17,7 @@ const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
 
 bool cfg_flag = false;
 bool voltflag = false;
+bool statflag = false;
 int CT_value = 0;
 volatile int STATE = LOW;
 int error;
@@ -32,28 +33,35 @@ const int AMS_Stat = 7;
 const int CAN_CS = 9;
 const int LTC6803_CS = 10;
 const int Beta = 4250;
-const int rinf = 64; // in milliohms//100000*exp(-1*(Beta/298.15));
-unsigned long millistime; 
+const float rinf = 100000*exp(-1*(Beta/298.15));
+unsigned long conversiontime; 
 unsigned long OWTime;
+uint16_t VoltMin;
+uint8_t VoltMinTrans;
+uint16_t VoltMax;
+uint8_t VoltMaxTrans;
+uint16_t PackVoltage;
+uint8_t PackVoltageTrans;
+uint16_t MaxTemp;
+uint8_t MaxTempTrans;
 
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
 //const float Gain = .004;         // for current transducer, in V/A
 const int inv_Gain = 250;         // *250 = /.004
 const int Offset = 512;        // 0 current offset, allows measurement in both directions. 
-//float TS_current;
-int TS_current;
+uint16_t TS_current;
 const int ESR = 4;            // ESR of the entire pack. Need to change this. 
 //analog pin
 const int CT_Sense = 0;
 
 //----LT constants----
-//const float balance = 2.67;      // Balance Voltage - at this voltage send CAN message to stop regen
-const int balance = 3670;         // Balance Voltage (mV) - at this voltage send CAN message to stop regen
-//const float stopbalance = 2.6;    // Voltage to stop balancing at, can start regen again
-const int stopbalance = 3600;    // Voltage (mV) to stop balancing at, can start regen again
-//const float OV = 2.8;             // Voltage to shut down TS at
-const int OV = 3800;             // Voltage (mV) to shut down TS at
+//const float balance = 2.67;         // Balance Voltage - at this voltage send CAN message to stop regen
+const int balance = 3670;             // Balance Voltage (mV) - at this voltage send CAN message to stop regen
+//const float stopbalance = 2.6;      // Voltage to stop balancing at, can start regen again
+const int stopbalance = 3500;         // Voltage (mV) to stop balancing at, can start regen again
+//const float OV = 2.8;               // Voltage to shut down TS at
+const int OV = 3800;                  // Voltage (mV) to shut down TS at
 byte PEC = 0x00;
 
 //----CAN SHIELD STUFF----
@@ -82,7 +90,7 @@ uint16_t temp_codes[TOTAL_IC][3] = {0};
  |------------------|-----------------|-----------------|-----------------|-----------------|-----------|
  |IC1 Temp1         |IC1 Temp2        |IC1 ITemp        |IC2 Temp1        |IC2 Temp2        |  .....    |
 */
-uint16_t temps[TOTAL_IC][3] = {0};
+float temps[TOTAL_IC][3] = {0};
 
 uint8_t tx_cfg[TOTAL_IC][6];
 /*!<
@@ -165,17 +173,18 @@ void setup() {                         // No Serial connection at the moment.
 
   //show ready to go
   pinMode(AMS_Stat, OUTPUT);
+  statflag = true;
   digitalWrite(AMS_Stat, HIGH);
   pinMode(WD_Vis, OUTPUT);
   digitalWrite(WD_Vis, LOW);
-  millistime = millis();
-  OWTime = millistime;
+  conversiontime = millis();
+  OWTime = conversiontime;
 
 }
 
 void loop() {
   //----OpenWire detect?----
-  if(millis() - OWTime >=1000){
+  if(millis() - OWTime >=30000){
     LTC6803_stowdc();     //START OPEN WIRE CONVERSION
     OWTime = millis();
   } 
@@ -183,7 +192,7 @@ void loop() {
     LTC6803_stcvdc();     //start cv conversion
   }
   LTC6803_sttmpad();      //start temp conversion
-  millistime = millis();
+  conversiontime = millis();
   //----Read TS Current ----
 
   /*
@@ -200,11 +209,15 @@ void loop() {
   Can be placed below receiving new data for "proper" ness but it won't be as fast
   due to floating point math happening*/
   VoltageFix();
+  VoltMaxTrans = map(VoltMax,0,1023,0,255);
+  VoltMinTrans = map(VoltMin,0,1023,0,255);
+  PackVoltageTrans = map(PackVoltage,0,1023,0,255);
   OVCheck();
   StopBal();
   VoltToTemp();
-  Serial.println(temps[0][2]);  
-  // gets temperatures, stores in temps array
+  Serial.print(temps[0][0]); 
+  Serial.print(" ");
+  Serial.println(temps[0][2]); 
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -235,8 +248,7 @@ void loop() {
   
   
   //burns any remaining time for conversion
-  while(millis()-millistime > 18){
-  }                              
+  while(millis()-conversiontime > 20){}                              
   //actually receiving data from cell stack.
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
   errorcheck(error);
@@ -246,26 +258,30 @@ void loop() {
 
 // takes voltages from temp readings, turns them into actual temps
 void VoltToTemp(){
+  TempMax = 0;
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
   {
     for(int cell_counter = 0;cell_counter < 3;cell_counter++)
     {
-      // our setup has no thermistors on IC 2 (the middle one) and only one on IC 1 (bottom of stack) 
+      // our setup has no thermistors on IC 1 (the middle one)  
       if(ic_counter == 1 && cell_counter !=2){
         temps[ic_counter][cell_counter] = 0;
         continue;
       }
+      //Only 1 thermistor (Ambient) on IC 0 (bottom of stack)
       if(ic_counter == 0 && cell_counter == 1){
-        //temps[ic_counter][cell_counter] = 0;
+        temps[ic_counter][cell_counter] = 0;
         continue;
       }
       if(cell_counter == 2){ //internal temps are measured differently
         temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*3/16)-273;
         continue; 
       }
-      temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter]));       //weird scaling to proper voltage
-      temps[ic_counter][cell_counter]*=100000/(5-temps[ic_counter][cell_counter]);               //voltage to resistance, Ohms
-      temps[ic_counter][cell_counter] = Beta/(log(temps[ic_counter][cell_counter]*1000/(rinf)));      //resistance to temp
+      //Changes samples to resistance 
+      temps[ic_counter][cell_counter] = temp_codes[ic_counter][cell_counter]*1.5*.001;                                          //Samples to volts
+      temps[ic_counter][cell_counter] = 100000 * temps[ic_counter][cell_counter]/(3.0625 - temps[ic_counter][cell_counter]);    // Voltage to resistance, Ohms
+      temps[ic_counter][cell_counter] = (Beta/(log(temps[ic_counter][cell_counter]/rinf)))-273.15;                              //resistance to temp
+      TempMax = max(TempMax,temps[ic_counter][cell_counter]);
     }
   }
 }
@@ -281,12 +297,18 @@ inline void errorcheck(int error){
 
 //---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
 void VoltageFix(){
+  PackVoltage = 0;
+  VoltMin = 10;
+  VoltMax = 0;
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
   {
     for(int cell_counter = 0;cell_counter < 12;cell_counter++)
     {
       voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter]) *15/10;       //chip reports with an offset, this gets actual voltage (mV)
       //voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
+      VoltMin = min(VoltMin, voltages[ic_counter][cell_counter]);       //calc min
+      VoltMax = max(VoltMax, voltages[ic_counter][cell_counter]);       //calc max
+      PackVoltage += voltages[ic_counter][cell_counter];                //total pack
     }
   }
 }
@@ -368,7 +390,9 @@ uint8_t DCC_cell(uint8_t input){
   }
 }
 
-//---- Checks for OV & balance conditions----
+/*---- Checks for OV & balance conditions----
+*If a cell voltage is higher than OV, shutdown AMS
+ */
 void OVCheck(){
   for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) //Loop through all ICs
   {
@@ -380,6 +404,7 @@ void OVCheck(){
         if( voltages[ic_counter][cv_counter] > OV) //if need to shutdown tractive system due to OV.
         {
           digitalWrite(AMS_Stat, LOW);
+          statflag = false;
         }
         if(cv_counter < 8)
         {
@@ -395,7 +420,9 @@ void OVCheck(){
   }
 }
 
-//---- Checks for balance end conditions----
+/*---- Checks for balance end conditions----
+ * If Tractive System was shut down, allow re-enable of reset circuit.
+ */
 void StopBal(){
   for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) //Loop through all ICs
   {
@@ -411,6 +438,10 @@ void StopBal(){
         {
           tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
           cfg_flag = true;
+        }
+        if(!statflag){
+          statflag = true;
+          digitalWrite(AMS_Stat, HIGH);
         }
       }
     }
