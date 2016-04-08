@@ -13,11 +13,16 @@ and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 #include <TimerOne.h>
 #include <math.h>
 
+#define CAN_EN              // Comment this out for no CAN chip, ie for testing.
+#define SER_EN              // Comment this out for no Serial ie for in final car
+//#define OLD_BAL           // Old balance code that works, no regen re-enable
+#define NEW_BAL             // New, more optimized balance code that should be faster and includes regen re-enable
 const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
 
 bool cfg_flag = false;
 bool voltflag = false;
 bool statflag = false;
+bool chargeflag = false;
 int CT_value = 0;
 volatile int STATE = LOW;
 int error;
@@ -44,6 +49,7 @@ uint16_t PackVoltage;
 uint8_t PackVoltageTrans;
 uint16_t MaxTemp;
 uint8_t MaxTempTrans;
+uint8_t FlagTrans;
 
 //----Current Transducer constants----
 const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
@@ -63,13 +69,20 @@ const int stopbalance = 3500;         // Voltage (mV) to stop balancing at, can 
 //const float OV = 2.8;               // Voltage to shut down TS at
 const int OV = 3800;                  // Voltage (mV) to shut down TS at
 byte PEC = 0x00;
+#ifdef NEW_BAL
+  bool discharging = false;
+#endif
 
 //----CAN SHIELD STUFF----
-MCP_CAN CAN(CAN_CS);
-unsigned char inFromCAN[8];
-unsigned char len = 0;
-unsigned long canID;
-const unsigned long DEVICE_ID = 0x56;     // change me!
+#ifdef CAN_EN
+  MCP_CAN CAN(CAN_CS);
+  unsigned char dataToSend[8];
+  unsigned char inFromCAN[8];
+  unsigned char len = 0;
+  unsigned long canID;
+  const unsigned long Receive_ID = 0x52;     
+  const unsigned long Trans_ID = 0x51;
+#endif
 
 uint16_t cell_codes[TOTAL_IC][12] = {2}; 
 /*!< 
@@ -120,15 +133,17 @@ void init_cfg(){                       // sets initial configuration for all ICs
   for(int i = 0; i<TOTAL_IC;i++){
     tx_cfg[i][0] = 0x91;
     tx_cfg[i][1] = 0x00 ; 
-    tx_cfg[i][2] = 0x00 ;
-    tx_cfg[i][3] = 0x00 ; 
+    tx_cfg[i][2] = 0xF0 ;
+    tx_cfg[i][3] = 0xFF ; 
     tx_cfg[i][4] = 0x00 ;             //UnderVoltage value... Not applicable here. 
-    tx_cfg[i][5] = 0xAB ;             //OV set
+    tx_cfg[i][5] = 0xAB ;             //OV set... Not usefull so set high. 
   }
 }
 
-void setup() {                         // No Serial connection at the moment. 
-  Serial.begin(115200);
+void setup() { 
+  #ifdef SER_EN
+    Serial.begin(115200);
+  #endif
   //Sets Arduino pin modes
   pinMode(CAN_int, INPUT);
   pinMode(WDT, INPUT);
@@ -143,6 +158,21 @@ void setup() {                         // No Serial connection at the moment.
   //Timer1.initialize(freq);                 //timer at set freq
   //Timer1.attachInterrupt(timer_ISR);
   
+  //Initialize CAN interface
+  #ifdef CAN_EN
+    while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
+      {
+        #ifdef SER_EN
+          Serial.println("CAN BUS Shield init fail");
+          Serial.println(" Init CAN BUS Shield again");
+          delay(100);
+        #endif
+      }
+    //Serial.println("CAN BUS Shield init ok!");
+    CAN.init_Mask(0, 0, 0x3ff);                         // there are 2 mask in mcp2515, you need to set both of them
+    CAN.init_Mask(1, 0, 0x3ff);
+    CAN.init_Filt(0, 0, 0x52);
+  #endif
   // ---Turn on LTC Chips---
   pinMode(HW_Enable, OUTPUT);
   digitalWrite(HW_Enable, HIGH);
@@ -155,20 +185,6 @@ void setup() {                         // No Serial connection at the moment.
   errorcheck(error);                          //if PEC error, disable TS.
   cfg_check();                                //sets tx = rx, ensures local copy is same as chip copy. 
 
-  //Initialize CAN interface
-  // no interrupt atm, just poll for new data
-  //attachInterrupt(digitalPinToInterrupt(CAN_int),readFromCAN_ISR,FALLING);
-
-  /*
-  while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
-    {
-        //Serial.println("CAN BUS Shield init fail");
-        //Serial.println(" Init CAN BUS Shield again");
-        //delay(100);
-    }
-  //Serial.println("CAN BUS Shield init ok!");
-  */
-  
   //other initializations here
 
   //show ready to go
@@ -183,6 +199,11 @@ void setup() {                         // No Serial connection at the moment.
 }
 
 void loop() {
+  if(digitalRead(WDT) == LOW){
+    digitalWrite(AMS_Stat, LOW);
+    digitalWrite(WD_Vis, HIGH);
+    statflag = false;
+  }
   //----OpenWire detect?----
   if(millis() - OWTime >=30000){
     LTC6803_stowdc();     //START OPEN WIRE CONVERSION
@@ -209,15 +230,25 @@ void loop() {
   Can be placed below receiving new data for "proper" ness but it won't be as fast
   due to floating point math happening*/
   VoltageFix();
-  VoltMaxTrans = map(VoltMax,0,1023,0,255);
-  VoltMinTrans = map(VoltMin,0,1023,0,255);
-  PackVoltageTrans = map(PackVoltage,0,1023,0,255);
-  OVCheck();
-  StopBal();
+  #ifdef OLD_BAL
+    OVCheck();
+    StopBal();
+  #endif
+  #ifdef NEW_BAL
+    Balance_Check();
+  #endif
   VoltToTemp();
-  Serial.print(temps[0][0]); 
-  Serial.print(" ");
-  Serial.println(temps[0][2]); 
+  #ifdef SER_EN
+    Serial.print(temps[0][0]); 
+    Serial.print(" ");
+    Serial.print(temps[0][2]);
+    #ifdef NEW_BAL
+      Serial.println(discharging);
+    #else
+      Serial.print("\n");
+    #endif
+    
+  #endif 
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -226,26 +257,64 @@ void loop() {
     cfg_check();                                //read back, set local copies to what was read.
     cfg_flag = false;
   }
-  // check for CAN data
-  len = 0;
-  /*(CAN_MSGAVAIL == CAN.checkReceive()){
-        CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
-        canID = CAN.getCanId();
-    }
-  //sets midpack relay on for charging
-  if(canID == DEVICE_ID){
-    if(inFromCAN == 1){
-      digitalWrite(Midpack, HIGH);
-    }
-    if(inFromCAN != 1){
-      digitalWrite(Midpack, LOW);
-    }
-  }
-*/
+  // All CAN Operations
+  #ifdef CAN_EN
 
-  
-  //report cell voltage, temp, and CT values over CAN?
-  
+    //Check for CAN Messages
+    len = 0;
+    if(CAN_MSGAVAIL == CAN.checkReceive()){
+          CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
+          canID = CAN.getCanId();
+      }
+      
+    //sets midpack relay on for charging
+    if(canID == Receive_ID){
+      if(inFromCAN[0] == 1){
+        digitalWrite(Midpack, HIGH);
+        chargeflag = true;
+      }
+      if(inFromCAN[0] == 0){
+        digitalWrite(Midpack, LOW);
+        chargeflag = false;
+      }
+    }
+    
+  //Prepare data for CAN transmission
+  VoltMaxTrans = map(VoltMax,0,3000,0,255);
+  VoltMinTrans = map(VoltMin,0,3000,0,255);
+  PackVoltageTrans = map(PackVoltage,0,100000,0,255);
+  MaxTempTrans = uint8_t(MaxTemp);
+  //Sets data for CAN transmision based on status flags
+  if(AMS_Stat){
+    FlagTrans |= 0x1;
+  }
+  if(!AMS_Stat){
+    FlagTrans = FlagTrans & ~0x1;
+  }
+  if(chargeflag){
+    FlagTrans |= 0x2;
+  }
+  if(!chargeflag){
+    FlagTrans = FlagTrans & ~0x2;
+  }
+  if(voltflag){
+    FlagTrans |= 0x4;
+  }
+  if(!voltflag){
+    FlagTrans = FlagTrans & ~0x4;
+  }
+  //report cell voltage, temp, and CT values over CAN
+    dataToSend[0] = TS_current;
+    dataToSend[1] = TS_current >> 8;
+    dataToSend[2] = FlagTrans;                
+    dataToSend[3] = VoltMaxTrans;
+    dataToSend[4] = VoltMinTrans;
+    dataToSend[5] = PackVoltageTrans;
+    dataToSend[6] = MaxTempTrans;
+
+    CAN.sendMsgBuf(0x51, 0, 7, dataToSend);
+    
+  #endif
   
   //burns any remaining time for conversion
   while(millis()-conversiontime > 20){}                              
@@ -258,7 +327,7 @@ void loop() {
 
 // takes voltages from temp readings, turns them into actual temps
 void VoltToTemp(){
-  TempMax = 0;
+  MaxTemp = 0;
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
   {
     for(int cell_counter = 0;cell_counter < 3;cell_counter++)
@@ -281,7 +350,7 @@ void VoltToTemp(){
       temps[ic_counter][cell_counter] = temp_codes[ic_counter][cell_counter]*1.5*.001;                                          //Samples to volts
       temps[ic_counter][cell_counter] = 100000 * temps[ic_counter][cell_counter]/(3.0625 - temps[ic_counter][cell_counter]);    // Voltage to resistance, Ohms
       temps[ic_counter][cell_counter] = (Beta/(log(temps[ic_counter][cell_counter]/rinf)))-273.15;                              //resistance to temp
-      TempMax = max(TempMax,temps[ic_counter][cell_counter]);
+      MaxTemp = max(MaxTemp,temps[ic_counter][cell_counter]);
     }
   }
 }
@@ -389,62 +458,96 @@ uint8_t DCC_cell(uint8_t input){
   return 0b0;
   }
 }
-
-/*---- Checks for OV & balance conditions----
-*If a cell voltage is higher than OV, shutdown AMS
- */
-void OVCheck(){
-  for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) //Loop through all ICs
-  {
-    for(int cv_counter = 0;cv_counter < 4;cv_counter++) //Loop through all 
-    {
-      if( voltages[ic_counter][cv_counter] > balance)
-      {
-        voltflag = true;
-        if( voltages[ic_counter][cv_counter] > OV) //if need to shutdown tractive system due to OV.
-        {
-          digitalWrite(AMS_Stat, LOW);
-          statflag = false;
-        }
-        if(cv_counter < 8)
-        {
-          tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
-          cfg_flag = true;
-        }else
-        {
-          tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
-          cfg_flag = true;
+#ifdef OLD_BAL
+  /*---- Checks for OV & balance conditions----
+  *If a cell voltage is higher than OV, shutdown Tractive system
+   */
+  void OVCheck(){
+    for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
+      for(int cv_counter = 0;cv_counter < 4;cv_counter++){          //Loop through all cells
+        if( voltages[ic_counter][cv_counter] > balance){
+          voltflag = true;                                          // stop regen
+          if( voltages[ic_counter][cv_counter] > OV) {              //if need to shutdown tractive system due to OV.
+            digitalWrite(AMS_Stat, LOW);
+            statflag = false;
+          }
+          if(cv_counter < 8){
+            tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
+            cfg_flag = true;
+          }else{
+            tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
+            cfg_flag = true;
+          }
         }
       }
     }
   }
-}
-
-/*---- Checks for balance end conditions----
- * If Tractive System was shut down, allow re-enable of reset circuit.
- */
-void StopBal(){
-  for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) //Loop through all ICs
-  {
-    for(int cv_counter = 0;cv_counter < 4;cv_counter++) //Loop through all cells
-    {
-      if(voltages[ic_counter][cv_counter] <= stopbalance)
-      { 
-        if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter)))
-        {
-          tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
-          cfg_flag = true;
-        }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0))
-        {
-          tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
-          cfg_flag = true;
-        }
-        if(!statflag){
-          statflag = true;
-          digitalWrite(AMS_Stat, HIGH);
+  
+  /*---- Checks for balance end conditions----
+   * If Tractive System was shut down, allow re-enable of reset circuit.
+   */
+  void StopBal(){
+    for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) {  //Loop through all ICs
+      for(int cv_counter = 0;cv_counter < 4;cv_counter++){      //Loop through all cells
+        if(voltages[ic_counter][cv_counter] <= stopbalance){ 
+          if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter))){
+            tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
+            cfg_flag = true;
+          }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0)){
+            tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
+            cfg_flag = true;
+          }
+          if(!statflag){
+            statflag = true;
+            digitalWrite(AMS_Stat, HIGH);
+          }
         }
       }
     }
   }
-}
+#endif
+
+#ifdef NEW_BAL
+  void Balance_Check(){
+    for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
+      discharging = true;
+      for(int cv_counter = 0;cv_counter < 4;cv_counter++){          //Loop through all cells
+    
+      //over voltage checks
+        if( voltages[ic_counter][cv_counter] > balance){
+          voltflag = true;                                          // stop regen
+          if( voltages[ic_counter][cv_counter] > OV) {              //if need to shutdown tractive system due to OV.
+            digitalWrite(AMS_Stat, LOW);
+            statflag = false;
+          }
+          if(cv_counter < 8){
+            tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
+            cfg_flag = true;
+          }else{
+            tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
+            cfg_flag = true;
+          }
+        }
+  
+      //under voltage checks
+        if(voltages[ic_counter][cv_counter] <= stopbalance){ 
+          if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter))){
+            tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
+            cfg_flag = true;
+          }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0)){
+            tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
+            cfg_flag = true;
+          }
+          if(!statflag){
+            statflag = true;
+            digitalWrite(AMS_Stat, HIGH);
+          }
+        }
+      }
+      if((tx_cfg[ic_counter][1] == 0x00) && ((tx_cfg[ic_counter][2] << 4) == 0x00)){
+        discharging = false;
+      }
+    }
+  }
+#endif
 
