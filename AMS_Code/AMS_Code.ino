@@ -30,8 +30,8 @@ int error;
 //digital pins
 const int CAN_int = 2;
 const int WD_Vis = 3;
-const int WDT = 4;
-const int Midpack = 5;
+const int WDT = 5;
+const int Midpack = 4;
 const int HW_Enable = 6;
 const int AMS_Stat = 7;
 const int CAN_CS = 9;
@@ -44,7 +44,7 @@ uint16_t VoltMin;
 uint8_t VoltMinTrans;
 uint16_t VoltMax;
 uint8_t VoltMaxTrans;
-uint16_t PackVoltage;
+uint32_t PackVoltage;
 uint8_t PackVoltageTrans;
 uint16_t MaxTemp;
 uint8_t MaxTempTrans;
@@ -82,7 +82,7 @@ byte PEC = 0x00;
   const unsigned long Trans_ID = 0x51;
 #endif
 
-uint16_t cell_codes[TOTAL_IC][12] = {2}; 
+uint16_t cell_codes[TOTAL_IC][12] = {1}; 
 /*!< 
   The cell codes will be stored in the cell_codes[][12] array in the following format:
   
@@ -143,7 +143,7 @@ void setup() {
     wdt_disable();
   #endif
   #ifdef SER_EN
-    Serial.begin(115200);
+    Serial.begin(250000);
   #endif
   //Sets Arduino pin modes
   pinMode(CAN_int, INPUT);
@@ -206,6 +206,11 @@ void loop() {
     digitalWrite(WD_Vis, HIGH);
     statflag = false;
   }
+  if(digitalRead(WDT) == HIGH){
+    digitalWrite(WD_Vis, LOW);
+    digitalWrite(AMS_Stat, HIGH);
+    statflag = true;
+  }
   //----OpenWire detect?----
   if(millis() - OWTime >=30000){
     LTC6803_stowdc();     //START OPEN WIRE CONVERSION
@@ -221,10 +226,6 @@ void loop() {
   /*
   CT_value = analogRead(CT_Sense);
   TS_current = (CT_value - Offset) * inv_Gain;
-  if(digitalRead(WDT) == LOW){
-    digitalWrite(AMS_Stat, LOW);
-    digitalWrite(WD_Vis, HIGH);
-  }
 
   */
 
@@ -273,25 +274,44 @@ void loop() {
     
   //Prepare data for CAN transmission
   VoltMaxTrans = map(VoltMax,0,3000,0,255);
+  //Serial.print("Max Voltage: ");
+  //Serial.print(VoltMax);
+  //Serial.print(" ");
   VoltMinTrans = map(VoltMin,0,3000,0,255);
+ // Serial.print("Min Voltage: ");
+  //Serial.print(VoltMin);
+  //Serial.print(" ");
   PackVoltageTrans = map(PackVoltage,0,100000,0,255);
+  //Serial.print("Pack Voltage: ");
+  //Serial.print(PackVoltage);
+  //Serial.print(" ");
+  //Serial.print("Max Temp: ");
+  //Serial.print(MaxTemp);
+  //Serial.print(" ");
   MaxTempTrans = uint8_t(MaxTemp);
   //Sets data for CAN transmision based on status flags
-  if(AMS_Stat){
+  if(statflag){
     FlagTrans |= 0x1;
+    //Serial.print("AMS good ");
   }else{
     FlagTrans = FlagTrans & ~0x1;
+    //Serial.print("AMS Not good ");
   }
   if(chargeflag){
     FlagTrans |= 0x2;
+    //Serial.print("Charging Enabled ");
   }else{
     FlagTrans = FlagTrans & ~0x2;
+    //Serial.print("Charging Not Enabled ");
   }
   if(voltflag){
     FlagTrans |= 0x4;
+    //Serial.print("Regen okay ");
   }else{
     FlagTrans = FlagTrans & ~0x4;
+    //Serial.print("Regen not okay ");
   }
+  //Serial.print("\n");
   //report cell voltage, temp, and CT values over CAN
     dataToSend[0] = TS_current;
     dataToSend[1] = TS_current >> 8;
@@ -302,12 +322,12 @@ void loop() {
     dataToSend[6] = MaxTempTrans;
 
     CAN.sendMsgBuf(0x51, 0, 7, dataToSend);
-    Serial.print("CAN Message:");
+    //Serial.print("CAN Message:");
     for(int i = 0;i<7;i++){
-      Serial.print(dataToSend[i]);
-      Serial.print(", ");
+      //Serial.print(dataToSend[i]);
+      //Serial.print(", ");
     }
-    Serial.print("\n");
+    //Serial.print("\n");
   #endif
   
   //burns any remaining time for conversion
@@ -320,12 +340,35 @@ void loop() {
 }
 
 // takes voltages from temp readings, turns them into actual temps
+// Currently Not right.. below is readouts.
+/*Initial to steady state. 
+ * IC: 0 thermistor #: 0 Samples measured: 0.00 Temp: -273.15 thermistor #: 2 Internal Temp: 65263.00
+ * IC: 1 thermistor #: 2 Internal Temp: 65263.00
+ * IC: 2 thermistor #: 0 Samples measured: 0.00 Temp: -273.15 thermistor #: 1 Samples measured: 0.00 Temp: -273.15 thermistor #: 2 Internal Temp: 65263.00
+ * 
+ * 
+ * 
+ * IC: 0 thermistor #: 0 Samples measured: -273.15 Temp: nan thermistor #: 2 Internal Temp: 398.00
+ * IC: 1 thermistor #: 2 Internal Temp: 398.00
+ * IC: 2 thermistor #: 0 Samples measured: -273.15 Temp: 70.21 thermistor #: 1 Samples measured: -273.15 Temp: nan thermistor #: 2 Internal Temp: 398.00
+ * 
+ * 
+ * 
+ * IC: 0 thermistor #: 0 Samples measured: nan Temp: nan thermistor #: 2 Internal Temp: 398.00
+ * IC: 1 thermistor #: 2 Internal Temp: 398.00
+ * IC: 2 thermistor #: 0 Samples measured: 70.21 Temp: 70.21 thermistor #: 1 Samples measured: nan Temp: nan thermistor #: 2 Internal Temp: 398.00
+ * 
+ * 
+ * 
+ * 
+ */
 void VoltToTemp(){
   MaxTemp = 0;
-  for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
-  {
-    for(int cell_counter = 0;cell_counter < 3;cell_counter++)
-    {
+  for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++){
+    Serial.print("IC: ");
+    Serial.print(ic_counter);
+    Serial.print(" ");
+    for(int cell_counter = 0;cell_counter < 3;cell_counter++){
       // our setup has no thermistors on IC 1 (the middle one)  
       if(ic_counter == 1 && cell_counter !=2){
         temps[ic_counter][cell_counter] = 0;
@@ -338,21 +381,40 @@ void VoltToTemp(){
       }
       if(cell_counter == 2){ //internal temps are measured differently
         temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*3/16)-273;
+      Serial.print("thermistor #: ");
+      Serial.print(cell_counter);
+      Serial.print(" ");
+      Serial.print("Internal Temp: ");
+      Serial.print(temps[ic_counter][cell_counter]);
         continue; 
       }
-      //Changes samples to resistance 
+      Serial.print("thermistor #: ");
+      Serial.print(cell_counter);
+      Serial.print(" ");
+      Serial.print("Samples measured: ");
+      Serial.print(temps[ic_counter][cell_counter]);
+      Serial.print(" ");
       temps[ic_counter][cell_counter] = temp_codes[ic_counter][cell_counter]*1.5*.001;                                          //Samples to volts
+      //Serial.print("Volts measured: ");
+      //Serial.print(temps[ic_counter][cell_counter]);
+      //Serial.print(" ");
       temps[ic_counter][cell_counter] = 100000 * temps[ic_counter][cell_counter]/(3.0625 - temps[ic_counter][cell_counter]);    // Voltage to resistance, Ohms
+      //Serial.print("Resistance measured: ");
+      //Serial.print(temps[ic_counter][cell_counter]);
+      //Serial.print(" ");
       temps[ic_counter][cell_counter] = (Beta/(log(temps[ic_counter][cell_counter]/rinf)))-273.15;                              //resistance to temp
+      Serial.print("Temp: ");
+      Serial.print(temps[ic_counter][cell_counter]);
+      Serial.print(" "); 
       MaxTemp = max(MaxTemp,temps[ic_counter][cell_counter]);
     }
+    Serial.println("");
   }
 }
 
 //if any PEC error shows up, kill TS
 inline void errorcheck(int error){
-  if(error != 0)
-    {
+  if(error != 0){
       Serial.println("PEC ERROR");
       digitalWrite(AMS_Stat, LOW);
     }
@@ -361,34 +423,16 @@ inline void errorcheck(int error){
 //---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
 void VoltageFix(){
   PackVoltage = 0;
-  VoltMin = 10;
+  VoltMin = 100;
   VoltMax = 0;
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++){
-    /*
-    #ifdef SER_EN        
-      Serial.print("IC ");
-      Serial.print(ic_counter);
-      Serial.print(" ");
-    #endif
-    */
     for(int cell_counter = 0;cell_counter < 12;cell_counter++){
       voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter]) *15/10;       //chip reports with an offset, this gets actual voltage (mV)
       //voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
-      VoltMin = min(VoltMin, voltages[ic_counter][cell_counter]);       //calc min
+      VoltMin = min(VoltMin, voltages[ic_counter][cell_counter]);       //calc min      
       VoltMax = max(VoltMax, voltages[ic_counter][cell_counter]);       //calc max
-      /*
-      #ifdef SER_EN
-        Serial.print("Cell ");
-        Serial.print(cell_counter);
-        Serial.print(" ");
-        Serial.print(voltages[ic_counter][cell_counter]);
-        Serial.print(" ");
-      #endif*/
       PackVoltage += voltages[ic_counter][cell_counter];                //total pack
-    }/*
-    #ifdef SER_EN
-      Serial.print("\n");
-    #endif*/
+    }
   }
 }
 
@@ -521,8 +565,7 @@ uint8_t DCC_cell(uint8_t input){
   void Balance_Check(){
     for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
       discharging = true;
-      for(int cv_counter = 0;cv_counter < 4;cv_counter++){          //Loop through all cells
-    
+      for(int cv_counter = 0;cv_counter < 12;cv_counter++){          //Loop through all cells
       //over voltage checks
         if( voltages[ic_counter][cv_counter] > balance){
           voltflag = true;                                          // stop regen
@@ -538,6 +581,7 @@ uint8_t DCC_cell(uint8_t input){
             cfg_flag = true;
           }
         }
+        
   
       //under voltage checks
         if(voltages[ic_counter][cv_counter] <= stopbalance){ 
@@ -557,6 +601,9 @@ uint8_t DCC_cell(uint8_t input){
       if((tx_cfg[ic_counter][1] == 0x00) && ((tx_cfg[ic_counter][2] << 4) == 0x00)){
         discharging = false;
       }
+      #ifdef SER_EN
+      Serial.print("\n");
+      #endif
     }
   }
 #endif
