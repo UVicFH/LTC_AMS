@@ -3,21 +3,20 @@
 and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 
 /*TO DO: 
- * SET UP WATCHDOG ON NANO. INVOLVES NEW BOOTLOADER? 
- * SET UP CAN ID
-
+ * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
 */
 //Use functions from given library
 #include "LTC68031.h"
 #include "mcp_can.h"
-#include <TimerOne.h>
 #include <math.h>
+#include <avr/wdt.h>
 
-#define CAN_EN              // Comment this out for no CAN chip, ie for testing.
-#define SER_EN              // Comment this out for no Serial ie for in final car
-//#define OLD_BAL           // Old balance code that works, no regen re-enable
-#define NEW_BAL             // New, more optimized balance code that should be faster and includes regen re-enable
-const int TOTAL_IC = 1;     // Number of ICs in the daisy chain
+#define WDT_EN 0              // For on-board watchdog. Need Optiboot bootloader though. 
+#define CAN_EN 0              // Comment this out for no CAN chip, ie for testing.
+#define SER_EN 1              // Comment this out for no Serial ie for in final car
+#define OLD_BAL 0             // Old balance code that works, no regen re-enable
+#define NEW_BAL 1             // New, more optimized balance code that should be faster and includes regen re-enable
+const int TOTAL_IC = 3;       // Number of ICs in the daisy chain
 
 bool cfg_flag = false;
 bool voltflag = false;
@@ -52,7 +51,6 @@ uint8_t MaxTempTrans;
 uint8_t FlagTrans;
 
 //----Current Transducer constants----
-const int THRESHOLD = 40;       // Threshold to ignore the OV, as we're under large current draw causing false OV
 //const float Gain = .004;         // for current transducer, in V/A
 const int inv_Gain = 250;         // *250 = /.004
 const int Offset = 512;        // 0 current offset, allows measurement in both directions. 
@@ -141,6 +139,9 @@ void init_cfg(){                       // sets initial configuration for all ICs
 }
 
 void setup() { 
+  #ifdef WDT_EN
+    wdt_disable();
+  #endif
   #ifdef SER_EN
     Serial.begin(115200);
   #endif
@@ -150,13 +151,9 @@ void setup() {
   pinMode(Midpack, OUTPUT);
   digitalWrite(Midpack, LOW);
   pinMode(CAN_CS, OUTPUT);
-  digitalWrite(CAN_CS,HIGH);
+  //digitalWrite(CAN_CS,HIGH);
   pinMode(LTC6803_CS, OUTPUT);
   digitalWrite(LTC6803_CS,HIGH);
-  
-  //Initialize timer for interrupt, counts time for CAN messages and OC detect. 
-  //Timer1.initialize(freq);                 //timer at set freq
-  //Timer1.attachInterrupt(timer_ISR);
   
   //Initialize CAN interface
   #ifdef CAN_EN
@@ -165,13 +162,13 @@ void setup() {
         #ifdef SER_EN
           Serial.println("CAN BUS Shield init fail");
           Serial.println(" Init CAN BUS Shield again");
-          delay(100);
+          delay(200);
         #endif
       }
     //Serial.println("CAN BUS Shield init ok!");
-    CAN.init_Mask(0, 0, 0x3ff);                         // there are 2 mask in mcp2515, you need to set both of them
-    CAN.init_Mask(1, 0, 0x3ff);
-    CAN.init_Filt(0, 0, 0x52);
+    CAN.init_Mask(0, 0, 0xfff);                         // there are 2 mask in mcp2515, you need to set both of them
+    CAN.init_Mask(1, 0, 0xfff);
+    CAN.init_Filt(0, 0, Receive_ID);
   #endif
   // ---Turn on LTC Chips---
   pinMode(HW_Enable, OUTPUT);
@@ -195,10 +192,15 @@ void setup() {
   digitalWrite(WD_Vis, LOW);
   conversiontime = millis();
   OWTime = conversiontime;
-
+  #ifdef WDT_EN
+    wdt_enable(WDTO_4S);
+  #endif
 }
 
 void loop() {
+  #ifdef WDT_EN
+    wdt_reset();
+  #endif
   if(digitalRead(WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
     digitalWrite(WD_Vis, HIGH);
@@ -238,17 +240,7 @@ void loop() {
     Balance_Check();
   #endif
   VoltToTemp();
-  #ifdef SER_EN
-    Serial.print(temps[0][0]); 
-    Serial.print(" ");
-    Serial.print(temps[0][2]);
-    #ifdef NEW_BAL
-      Serial.println(discharging);
-    #else
-      Serial.print("\n");
-    #endif
-    
-  #endif 
+   
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -287,20 +279,17 @@ void loop() {
   //Sets data for CAN transmision based on status flags
   if(AMS_Stat){
     FlagTrans |= 0x1;
-  }
-  if(!AMS_Stat){
+  }else{
     FlagTrans = FlagTrans & ~0x1;
   }
   if(chargeflag){
     FlagTrans |= 0x2;
-  }
-  if(!chargeflag){
+  }else{
     FlagTrans = FlagTrans & ~0x2;
   }
   if(voltflag){
     FlagTrans |= 0x4;
-  }
-  if(!voltflag){
+  }else{
     FlagTrans = FlagTrans & ~0x4;
   }
   //report cell voltage, temp, and CT values over CAN
@@ -313,7 +302,12 @@ void loop() {
     dataToSend[6] = MaxTempTrans;
 
     CAN.sendMsgBuf(0x51, 0, 7, dataToSend);
-    
+    Serial.print("CAN Message:");
+    for(int i = 0;i<7;i++){
+      Serial.print(dataToSend[i]);
+      Serial.print(", ");
+    }
+    Serial.print("\n");
   #endif
   
   //burns any remaining time for conversion
@@ -369,16 +363,32 @@ void VoltageFix(){
   PackVoltage = 0;
   VoltMin = 10;
   VoltMax = 0;
-  for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++)
-  {
-    for(int cell_counter = 0;cell_counter < 12;cell_counter++)
-    {
+  for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++){
+    /*
+    #ifdef SER_EN        
+      Serial.print("IC ");
+      Serial.print(ic_counter);
+      Serial.print(" ");
+    #endif
+    */
+    for(int cell_counter = 0;cell_counter < 12;cell_counter++){
       voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter]) *15/10;       //chip reports with an offset, this gets actual voltage (mV)
       //voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
       VoltMin = min(VoltMin, voltages[ic_counter][cell_counter]);       //calc min
       VoltMax = max(VoltMax, voltages[ic_counter][cell_counter]);       //calc max
+      /*
+      #ifdef SER_EN
+        Serial.print("Cell ");
+        Serial.print(cell_counter);
+        Serial.print(" ");
+        Serial.print(voltages[ic_counter][cell_counter]);
+        Serial.print(" ");
+      #endif*/
       PackVoltage += voltages[ic_counter][cell_counter];                //total pack
-    }
+    }/*
+    #ifdef SER_EN
+      Serial.print("\n");
+    #endif*/
   }
 }
 
