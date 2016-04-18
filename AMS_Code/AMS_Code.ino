@@ -21,6 +21,10 @@ bool cfg_flag = false;
 bool voltflag = false;
 bool statflag = false;
 bool chargeflag = false;
+bool voltConvFlag = false;
+bool voltReceiveFlag = false;
+bool tempConvFlag = false;
+bool tempReceiveFlag = false;
 int CT_value = 0;
 int error;
 
@@ -124,7 +128,6 @@ uint8_t rx_cfg[TOTAL_IC][7];
 */
 
 
-
 void init_cfg(){                       // sets initial configuration for all ICs
   for(int i = 0; i<TOTAL_IC;i++){
     tx_cfg[i][0] = 0x91;
@@ -188,27 +191,55 @@ void setup() {
   digitalWrite(AMS_Stat, HIGH);
   pinMode(WD_Vis, OUTPUT);
   digitalWrite(WD_Vis, LOW);
-  conversiontime = millis();
-  OWTime = conversiontime;
   #ifdef WDT_EN
     wdt_enable(WDTO_4S);
   #endif
+  //Starts off the conversion chain
+  CellConversionReq();
+  conversiontime = millis();
+  OWTime = conversiontime;
+  voltConvFlag = true;
 }
 
 void loop() {
   #ifdef WDT_EN
     wdt_reset();
   #endif
+  
+  //check for LTC Watchdog reset
   if(digitalRead(WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
     digitalWrite(WD_Vis, HIGH);
     statflag = false;
-  }
-  if(digitalRead(WDT) == HIGH){
+  }else{
     digitalWrite(WD_Vis, LOW);
     digitalWrite(AMS_Stat, HIGH);
     statflag = true;
   }
+  
+  //----Read TS Current ----
+  CT_value = analogRead(CT_Sense);
+  TS_current = (CT_value - Offset) * inv_Gain;
+  
+  //Scheduled task for receiving cell voltages
+  if(voltConvFlag && (millis() - conversiontime > 20)){
+    ReceiveCells();
+  }
+  
+  //Scheduled task for receiving temperatures
+  if(tempConvFlag && (millis() - conversiontime > 5)){
+    ReceiveTemps();
+  }
+  
+  //CAN transmit/receive
+  #ifdef CAN_EN
+    CAN_Receive();
+    CAN_Trans();
+  #endif
+}
+
+//Request cell conversion from LTC chips 
+void CellConversionReq(){
   //----OpenWire detect?----
   if(millis() - OWTime >=30000){
     LTC6803_stowdc();     //START OPEN WIRE CONVERSION
@@ -217,19 +248,20 @@ void loop() {
   else {
     LTC6803_stcvdc();     //start cv conversion
   }
+  voltConvFlag = true;
   conversiontime = millis();
-  //----Read TS Current ----
+}
 
-  /*
-  CT_value = analogRead(CT_Sense);
-  TS_current = (CT_value - Offset) * inv_Gain;
-
-  */
-
-  /*These work one iteration behind on data - this is to burn as little time as possible. 
-  Can be placed below receiving new data for "proper" ness but it won't be as fast
-  due to floating point math happening*/
+void ReceiveCells(){
+  //Receive Cell Voltages
+  error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
+  errorcheck(error);
+  voltConvFlag = false;
+  
+  //Fix values to true voltages
   VoltageFix();
+  
+  //Check Balance/OV/Stop Balance conditions
   #ifdef OLD_BAL
     OVCheck();
     StopBal();
@@ -237,8 +269,7 @@ void loop() {
   #ifdef NEW_BAL
     Balance_Check();
   #endif
-  VoltToTemp();
-   
+  
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -247,18 +278,38 @@ void loop() {
     cfg_check();                                //read back, set local copies to what was read.
     cfg_flag = false;
   }
-  // All CAN Operations
-  #ifdef CAN_EN
+  voltReceiveFlag = true;
+  TempConversionReq();
+}
 
-    //Check for CAN Messages
+//Request temp conversion from LTC chips
+void TempConversionReq(){
+  LTC6803_sttmpad();      //start temp conversion 
+  tempConvFlag = true; 
+  conversiontime = millis();
+}
+
+void ReceiveTemps(){
+  //Receive Temps
+  error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
+  errorcheck(error);
+  tempConvFlag = false;
+  //Convert to Temperature
+  VoltToTemp();
+  tempReceiveFlag = true;
+  CellConversionReq();
+}
+
+//Check for CAN Messages
+void CAN_Receive(){
     len = 0;
     if(CAN_MSGAVAIL == CAN.checkReceive()){
           CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
-          canID = CAN.getCanId();
+          //canID = CAN.getCanId();
       }
       
     //sets midpack relay on for charging
-    if(canID == Receive_ID){
+    //if(canID == Receive_ID){
       if(inFromCAN[0] == 1){
         digitalWrite(Midpack, HIGH);
         chargeflag = true;
@@ -267,25 +318,24 @@ void loop() {
         digitalWrite(Midpack, LOW);
         chargeflag = false;
       }
-    }
-    
+    //}
+   
+}
+
+// Transmit data over CAN
+void CAN_Trans(){
   //Prepare data for CAN transmission
-  VoltMaxTrans = map(VoltMax,0,3000,0,255);
-  //Serial.print("Max Voltage: ");
-  //Serial.print(VoltMax);
-  //Serial.print(" ");
-  VoltMinTrans = map(VoltMin,0,3000,0,255);
- // Serial.print("Min Voltage: ");
-  //Serial.print(VoltMin);
-  //Serial.print(" ");
-  PackVoltageTrans = map(PackVoltage,0,100000,0,255);
-  //Serial.print("Pack Voltage: ");
-  //Serial.print(PackVoltage);
-  //Serial.print(" ");
-  //Serial.print("Max Temp: ");
-  //Serial.print(MaxTemp);
-  //Serial.print(" ");
-  MaxTempTrans = uint8_t(MaxTemp);
+  if(voltReceiveFlag){        //update transmission values only when new data in
+    VoltMaxTrans = map(VoltMax,0,3000,0,255);
+    VoltMinTrans = map(VoltMin,0,3000,0,255);
+    PackVoltageTrans = map(PackVoltage,0,100000,0,255);
+    voltReceiveFlag = false;
+  }
+  if(tempReceiveFlag){      //update transmission values only when new data in
+      MaxTempTrans = uint8_t(MaxTemp);
+      tempReceiveFlag = false;
+  }
+ 
   //Sets data for CAN transmision based on status flags
   if(statflag){
     FlagTrans |= 0x1;
@@ -302,29 +352,18 @@ void loop() {
   }else{
     FlagTrans = FlagTrans & ~0x4;
   }
-  //report cell voltage, temp, and CT values over CAN
-    dataToSend[0] = TS_current;
-    dataToSend[1] = TS_current >> 8;
-    dataToSend[2] = FlagTrans;                
-    dataToSend[3] = VoltMaxTrans;
-    dataToSend[4] = VoltMinTrans;
-    dataToSend[5] = PackVoltageTrans;
-    dataToSend[6] = MaxTempTrans;
-
-    CAN.sendMsgBuf(0x51, 0, 7, dataToSend);
-  #endif
   
-  //burns any remaining time for conversion
-  while(millis()-conversiontime > 20){}                              
-  //actually receiving data from cell stack.
-  LTC6803_sttmpad();      //start temp conversion
-  conversiontime = millis();
-  error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
-  errorcheck(error);
-  //burns any remaining time for conversion
-  while(millis()-conversiontime > 30){}
-  error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
-  errorcheck(error);
+  //report cell voltage, temp, and CT values over CAN
+  dataToSend[0] = TS_current;
+  dataToSend[1] = TS_current >> 8;
+  dataToSend[2] = FlagTrans;                
+  dataToSend[3] = VoltMaxTrans;
+  dataToSend[4] = VoltMinTrans;
+  dataToSend[5] = PackVoltageTrans;
+  dataToSend[6] = MaxTempTrans;
+
+  //Finally Send data
+  CAN.sendMsgBuf(Trans_ID, 0, 7, dataToSend);
 }
 
 // takes voltages from temp readings, turns them into actual temps
@@ -401,47 +440,6 @@ void cfg_check(){
   }
 }
 
-//----helper function to get hex value from decimal. 8 bit only----
-uint8_t getHEX(uint8_t input){
-  switch(input)
-  {
-    case 0:
-    return 0x00;
-    case 1:
-    return 0x01;
-    case 2:
-    return 0x02;
-    case 3:
-    return 0x03;
-    case 4:
-    return 0x04;
-    case 5:
-    return 0x05;
-    case 6:
-    return 0x06;
-    case 7:
-    return 0x07;
-    case 8:
-    return 0x08;
-    case 9:
-    return 0x09;
-    case 10:
-    return 0x0A;
-    case 11:
-    return 0x0B;
-    case 12:
-    return 0x0C;
-    case 13:
-    return 0x0D;
-    case 14:
-    return 0x0E;
-    case 15:
-    return 0x0F;
-    default:
-    return 0x00;
-  }
-}
-
 //----get cell discharge bit from decimal value----
 uint8_t DCC_cell(uint8_t input){
   switch(input)
@@ -466,6 +464,7 @@ uint8_t DCC_cell(uint8_t input){
   return 0b0;
   }
 }
+
 #ifdef OLD_BAL
   /*---- Checks for OV & balance conditions----
   *If a cell voltage is higher than OV, shutdown Tractive system
