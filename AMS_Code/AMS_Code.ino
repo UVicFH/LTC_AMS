@@ -1,6 +1,5 @@
 //Brandon AMS Start
-/*requires the download of TimerOne-r11 from here: https://code.google.com/archive/p/arduino-timerone/downloads
-and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
+/*requires the download of spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 
 /*TO DO: 
  * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
@@ -13,7 +12,7 @@ and spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
 
 #define WDT_EN 0              // For on-board watchdog. Need Optiboot bootloader though. 
 #define CAN_EN 0              // Comment this out for no CAN chip, ie for testing.
-#define SER_EN 1              // Comment this out for no Serial ie for in final car
+#define SER_EN 0              // Comment this out for no Serial ie for in final car
 #define OLD_BAL 0             // Old balance code that works, no regen re-enable
 #define NEW_BAL 1             // New, more optimized balance code that should be faster and includes regen re-enable
 const int TOTAL_IC = 3;       // Number of ICs in the daisy chain
@@ -23,7 +22,6 @@ bool voltflag = false;
 bool statflag = false;
 bool chargeflag = false;
 int CT_value = 0;
-volatile int STATE = LOW;
 int error;
 
 //----HW constants------
@@ -61,11 +59,11 @@ const int CT_Sense = 0;
 
 //----LT constants----
 //const float balance = 2.67;         // Balance Voltage - at this voltage send CAN message to stop regen
-const int balance = 3670;             // Balance Voltage (mV) - at this voltage send CAN message to stop regen
+const int balance = 3100;             // Balance Voltage (mV) - at this voltage send CAN message to stop regen
 //const float stopbalance = 2.6;      // Voltage to stop balancing at, can start regen again
-const int stopbalance = 3500;         // Voltage (mV) to stop balancing at, can start regen again
+const int stopbalance = 2600;         // Voltage (mV) to stop balancing at, can start regen again
 //const float OV = 2.8;               // Voltage to shut down TS at
-const int OV = 3800;                  // Voltage (mV) to shut down TS at
+const int OV = 3400;                  // Voltage (mV) to shut down TS at
 byte PEC = 0x00;
 #ifdef NEW_BAL
   bool discharging = false;
@@ -219,7 +217,6 @@ void loop() {
   else {
     LTC6803_stcvdc();     //start cv conversion
   }
-  LTC6803_sttmpad();      //start temp conversion
   conversiontime = millis();
   //----Read TS Current ----
 
@@ -292,26 +289,19 @@ void loop() {
   //Sets data for CAN transmision based on status flags
   if(statflag){
     FlagTrans |= 0x1;
-    //Serial.print("AMS good ");
   }else{
     FlagTrans = FlagTrans & ~0x1;
-    //Serial.print("AMS Not good ");
   }
   if(chargeflag){
     FlagTrans |= 0x2;
-    //Serial.print("Charging Enabled ");
   }else{
     FlagTrans = FlagTrans & ~0x2;
-    //Serial.print("Charging Not Enabled ");
   }
   if(voltflag){
     FlagTrans |= 0x4;
-    //Serial.print("Regen okay ");
   }else{
     FlagTrans = FlagTrans & ~0x4;
-    //Serial.print("Regen not okay ");
   }
-  //Serial.print("\n");
   //report cell voltage, temp, and CT values over CAN
     dataToSend[0] = TS_current;
     dataToSend[1] = TS_current >> 8;
@@ -322,93 +312,49 @@ void loop() {
     dataToSend[6] = MaxTempTrans;
 
     CAN.sendMsgBuf(0x51, 0, 7, dataToSend);
-    //Serial.print("CAN Message:");
-    for(int i = 0;i<7;i++){
-      //Serial.print(dataToSend[i]);
-      //Serial.print(", ");
-    }
-    //Serial.print("\n");
   #endif
   
   //burns any remaining time for conversion
   while(millis()-conversiontime > 20){}                              
   //actually receiving data from cell stack.
+  LTC6803_sttmpad();      //start temp conversion
+  conversiontime = millis();
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
   errorcheck(error);
+  //burns any remaining time for conversion
+  while(millis()-conversiontime > 30){}
   error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
   errorcheck(error);
 }
 
 // takes voltages from temp readings, turns them into actual temps
-// Currently Not right.. below is readouts.
-/*Initial to steady state. 
- * IC: 0 thermistor #: 0 Samples measured: 0.00 Temp: -273.15 thermistor #: 2 Internal Temp: 65263.00
- * IC: 1 thermistor #: 2 Internal Temp: 65263.00
- * IC: 2 thermistor #: 0 Samples measured: 0.00 Temp: -273.15 thermistor #: 1 Samples measured: 0.00 Temp: -273.15 thermistor #: 2 Internal Temp: 65263.00
- * 
- * 
- * 
- * IC: 0 thermistor #: 0 Samples measured: -273.15 Temp: nan thermistor #: 2 Internal Temp: 398.00
- * IC: 1 thermistor #: 2 Internal Temp: 398.00
- * IC: 2 thermistor #: 0 Samples measured: -273.15 Temp: 70.21 thermistor #: 1 Samples measured: -273.15 Temp: nan thermistor #: 2 Internal Temp: 398.00
- * 
- * 
- * 
- * IC: 0 thermistor #: 0 Samples measured: nan Temp: nan thermistor #: 2 Internal Temp: 398.00
- * IC: 1 thermistor #: 2 Internal Temp: 398.00
- * IC: 2 thermistor #: 0 Samples measured: 70.21 Temp: 70.21 thermistor #: 1 Samples measured: nan Temp: nan thermistor #: 2 Internal Temp: 398.00
- * 
- * 
- * 
- * 
- */
 void VoltToTemp(){
   MaxTemp = 0;
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++){
-    Serial.print("IC: ");
-    Serial.print(ic_counter);
-    Serial.print(" ");
     for(int cell_counter = 0;cell_counter < 3;cell_counter++){
       // our setup has no thermistors on IC 1 (the middle one)  
       if(ic_counter == 1 && cell_counter !=2){
-        temps[ic_counter][cell_counter] = 0;
         continue;
       }
       //Only 1 thermistor (Ambient) on IC 0 (bottom of stack)
       if(ic_counter == 0 && cell_counter == 1){
-        temps[ic_counter][cell_counter] = 0;
         continue;
       }
-      if(cell_counter == 2){ //internal temps are measured differently
-        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*3/16)-273;
-      Serial.print("thermistor #: ");
-      Serial.print(cell_counter);
-      Serial.print(" ");
-      Serial.print("Internal Temp: ");
-      Serial.print(temps[ic_counter][cell_counter]);
+      //internal temps are measured differently
+      if(cell_counter == 2){  
+        temps[ic_counter][cell_counter] = ((temp_codes[ic_counter][cell_counter])*0.1875)-273.15;
         continue; 
       }
-      Serial.print("thermistor #: ");
-      Serial.print(cell_counter);
-      Serial.print(" ");
-      Serial.print("Samples measured: ");
-      Serial.print(temps[ic_counter][cell_counter]);
-      Serial.print(" ");
-      temps[ic_counter][cell_counter] = temp_codes[ic_counter][cell_counter]*1.5*.001;                                          //Samples to volts
-      //Serial.print("Volts measured: ");
-      //Serial.print(temps[ic_counter][cell_counter]);
-      //Serial.print(" ");
+      //For some reason, I'm reading a ~0.34 V offset. Vendor code did it too, so I'm just adding it here. 
+      temps[ic_counter][cell_counter] = temp_codes[ic_counter][cell_counter] * 0.0015 + 0.34;
+      /*
+      if(ic_counter == 0 && cell_counter == 0){
+        Serial.println(temps[ic_counter][cell_counter],4); //Samples to volts
+      }*/
       temps[ic_counter][cell_counter] = 100000 * temps[ic_counter][cell_counter]/(3.0625 - temps[ic_counter][cell_counter]);    // Voltage to resistance, Ohms
-      //Serial.print("Resistance measured: ");
-      //Serial.print(temps[ic_counter][cell_counter]);
-      //Serial.print(" ");
       temps[ic_counter][cell_counter] = (Beta/(log(temps[ic_counter][cell_counter]/rinf)))-273.15;                              //resistance to temp
-      Serial.print("Temp: ");
-      Serial.print(temps[ic_counter][cell_counter]);
-      Serial.print(" "); 
       MaxTemp = max(MaxTemp,temps[ic_counter][cell_counter]);
     }
-    Serial.println("");
   }
 }
 
@@ -426,14 +372,22 @@ void VoltageFix(){
   VoltMin = 100;
   VoltMax = 0;
   for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++){
+    //Serial.print(ic_counter);
+    //Serial.print(" ");
     for(int cell_counter = 0;cell_counter < 12;cell_counter++){
+      //Serial.print(cell_counter);
+      //Serial.print(" ");
       voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter]) *15/10;       //chip reports with an offset, this gets actual voltage (mV)
+      //Serial.print(voltages[ic_counter][cell_counter]);
+      //Serial.print(" ");
       //voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
       VoltMin = min(VoltMin, voltages[ic_counter][cell_counter]);       //calc min      
       VoltMax = max(VoltMax, voltages[ic_counter][cell_counter]);       //calc max
       PackVoltage += voltages[ic_counter][cell_counter];                //total pack
     }
+    //Serial.print("\n");
   }
+  //Serial.print("\n");
 }
 
 //----sets tx =rx so that we know for sure what the status is----
@@ -602,7 +556,6 @@ uint8_t DCC_cell(uint8_t input){
         discharging = false;
       }
       #ifdef SER_EN
-      Serial.print("\n");
       #endif
     }
   }
