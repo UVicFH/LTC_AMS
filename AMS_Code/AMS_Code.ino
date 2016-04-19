@@ -1,10 +1,17 @@
 //Brandon AMS Start
-/*requires the download of spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield */
+/* Requires the download of spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield 
+ * 
+ * Constantly measures TS Current and sends over CAN.
+ * 
+ * Alternately requests cell voltages and temperatures 
+ * Due to LTC chip limitations
+*/
 
 /*TO DO: 
  * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
  * Test this code
 */
+
 //Use functions from given library
 #include "LTC68031.h"
 #include "mcp_can.h"
@@ -16,7 +23,7 @@
 #define SER_EN 0              // Comment this out for no Serial ie for in final car
 #define OLD_BAL 0             // Old balance code that works, no regen re-enable
 #define NEW_BAL 1             // New, more optimized balance code that should be faster and includes regen re-enable
-const int TOTAL_IC = 3;       // Number of ICs in the daisy chain
+#define TOTAL_IC 3            // Number of ICs in the daisy chain
 
 bool cfg_flag = false;
 bool voltflag = false;
@@ -31,15 +38,15 @@ int error;
 
 //----HW constants------
 //digital pins
-const int CAN_int = 2;
-const int WD_Vis = 3;
-const int WDT = 5;
-const int Midpack = 4;
-const int HW_Enable = 6;
-const int AMS_Stat = 7;
-const int CAN_CS = 9;
-const int LTC6803_CS = 10;
-const int Beta = 4250;
+#define CAN_int 2
+#define WD_LED 3
+#define LTC_WDT 5
+#define Midpack 4
+#define HW_Enable 6
+#define AMS_Stat 7
+#define CAN_CS 9
+#define LTC6803_CS 10
+#define Beta 4250
 const float rinf = 100000*exp(-1*(Beta/298.15));
 unsigned long conversiontime; 
 unsigned long OWTime;
@@ -129,17 +136,6 @@ uint8_t rx_cfg[TOTAL_IC][7];
 */
 
 
-void init_cfg(){                       // sets initial configuration for all ICs
-  for(int i = 0; i<TOTAL_IC;i++){
-    tx_cfg[i][0] = 0x91;
-    tx_cfg[i][1] = 0x00 ; 
-    tx_cfg[i][2] = 0xF0 ;
-    tx_cfg[i][3] = 0xFF ; 
-    tx_cfg[i][4] = 0x00 ;             //UnderVoltage value... Not applicable here. 
-    tx_cfg[i][5] = 0xAB ;             //OV set... Not usefull so set high. 
-  }
-}
-
 void setup() { 
   #ifdef WDT_EN
     wdt_disable();
@@ -147,54 +143,34 @@ void setup() {
   #ifdef SER_EN
     Serial.begin(250000);
   #endif
+  
   //Sets Arduino pin modes
   pinMode(CAN_int, INPUT);
-  pinMode(WDT, INPUT);
+  pinMode(LTC_WDT, INPUT);
   pinMode(Midpack, OUTPUT);
   digitalWrite(Midpack, LOW);
   pinMode(CAN_CS, OUTPUT);
-  //digitalWrite(CAN_CS,HIGH);
   pinMode(LTC6803_CS, OUTPUT);
   digitalWrite(LTC6803_CS,HIGH);
   
   //Initialize CAN interface
   #ifdef CAN_EN
-    while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
-      {
-        #ifdef SER_EN
-          Serial.println("CAN BUS Shield init fail");
-          Serial.println(" Init CAN BUS Shield again");
-          delay(200);
-        #endif
-      }
-    //Serial.println("CAN BUS Shield init ok!");
-    CAN.init_Mask(0, 0, 0xfff);                         // there are 2 mask in mcp2515, you need to set both of them
-    CAN.init_Mask(1, 0, 0xfff);
-    CAN.init_Filt(0, 0, Receive_ID);
+    CAN_Init();
   #endif
-  // ---Turn on LTC Chips---
-  pinMode(HW_Enable, OUTPUT);
-  digitalWrite(HW_Enable, HIGH);
-  delay(15);
-  // ---Initialize LTC chips
-  LTC6803_initialize();                       //Initialize LTC6803 hardware - sets SPI to 1MHz
-  init_cfg();
-  LTC6803_wrcfg(TOTAL_IC, tx_cfg);            //write cfg to chips
-  error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);    //read back, set local copies to what was read.
-  errorcheck(error);                          //if PEC error, disable TS.
-  cfg_check();                                //sets tx = rx, ensures local copy is same as chip copy. 
-
-  //other initializations here
+  
+  //Turn on LTC Chips
+  LTC_Init();                             
 
   //show ready to go
   pinMode(AMS_Stat, OUTPUT);
   statflag = true;
   digitalWrite(AMS_Stat, HIGH);
-  pinMode(WD_Vis, OUTPUT);
-  digitalWrite(WD_Vis, LOW);
+  pinMode(WD_LED, OUTPUT);
+  digitalWrite(WD_LED, LOW);
   #ifdef WDT_EN
     wdt_enable(WDTO_4S);
   #endif
+  
   //Starts off the conversion chain
   CellConversionReq();
   conversiontime = millis();
@@ -202,18 +178,19 @@ void setup() {
   voltConvFlag = true;
 }
 
-void loop() {
+void loop(){
+  //reset local watchdog timer
   #ifdef WDT_EN
     wdt_reset();
   #endif
   
   //check for LTC Watchdog reset
-  if(digitalRead(WDT) == LOW){
+  if(digitalRead(LTC_WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
-    digitalWrite(WD_Vis, HIGH);
+    digitalWrite(WD_LED, HIGH);
     statflag = false;
   }else{
-    digitalWrite(WD_Vis, LOW);
+    digitalWrite(WD_LED, LOW);
     digitalWrite(AMS_Stat, HIGH);
     statflag = true;
   }
@@ -239,6 +216,50 @@ void loop() {
   #endif
 }
 
+void init_cfg(){                       // sets initial configuration for all ICs
+  for(int i = 0; i<TOTAL_IC;i++){
+    tx_cfg[i][0] = 0x91;
+    tx_cfg[i][1] = 0x00 ; 
+    tx_cfg[i][2] = 0xF0 ;
+    tx_cfg[i][3] = 0xFF ; 
+    tx_cfg[i][4] = 0x00 ;             //UnderVoltage value... Not applicable here. 
+    tx_cfg[i][5] = 0xAB ;             //OV set... Not usefull so set high. 
+  }
+}
+
+//Initializes CAN interface
+CAN_Init(){
+  while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
+  {
+    #ifdef SER_EN
+      Serial.println("CAN BUS Shield init fail");
+      Serial.println(" Init CAN BUS Shield again");
+      delay(200);
+    #endif
+  }
+  CAN.init_Mask(0, 0, 0xfff);                         
+  CAN.init_Mask(1, 0, 0xfff);
+  CAN.init_Filt(0, 0, Receive_ID);
+}
+
+//Initializes LTC chips
+LTC_Init(){
+  pinMode(HW_Enable, OUTPUT);
+  digitalWrite(HW_Enable, HIGH);
+  delay(15);
+  // ---Initialize LTC chips
+  LTC6803_initialize();                       //Initialize LTC6803 hardware - sets SPI to 1MHz
+  init_cfg();
+  LTC6803_wrcfg(TOTAL_IC, tx_cfg);            //write cfg to chips
+  error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);    //read cfg register back
+  errorcheck(error);                          //if PEC error, disable TS.
+  /*set tx = rx, ensures local copy is same as chip copy. 
+   * Assumes LTC chips properly received data
+   * Valid assumption due to above check
+   */
+  cfg_check();   
+}
+
 //Request cell conversion from LTC chips 
 void CellConversionReq(){
   //----OpenWire detect?----
@@ -253,6 +274,11 @@ void CellConversionReq(){
   conversiontime = millis();
 }
 
+/* Receive cell voltages
+ * Fixes values from samples to volts by calling function
+ * Check for balance conditions by calling proper function depending on new/old bal
+ * Requests temp conversion
+ */
 void ReceiveCells(){
   //Receive Cell Voltages
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
@@ -290,6 +316,10 @@ void TempConversionReq(){
   conversiontime = millis();
 }
 
+/* Receive temperatures
+ * Fixes values from samples to volts to temperatures by calling function
+ * Requests cell conversion
+ */
 void ReceiveTemps(){
   //Receive Temps
   error = LTC6803_rdtmp(TOTAL_IC, temp_codes);  //read temps
