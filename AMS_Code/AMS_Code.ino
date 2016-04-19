@@ -3,6 +3,7 @@
 
 /*TO DO: 
  * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
+ * Test this code
 */
 //Use functions from given library
 #include "LTC68031.h"
@@ -25,7 +26,7 @@ bool voltConvFlag = false;
 bool voltReceiveFlag = false;
 bool tempConvFlag = false;
 bool tempReceiveFlag = false;
-int CT_value = 0;
+uint16_t CT_value = 0;
 int error;
 
 //----HW constants------
@@ -56,7 +57,7 @@ uint8_t FlagTrans;
 //const float Gain = .004;         // for current transducer, in V/A
 const int inv_Gain = 250;         // *250 = /.004
 const int Offset = 512;        // 0 current offset, allows measurement in both directions. 
-uint16_t TS_current;
+int TS_current;
 const int ESR = 4;            // ESR of the entire pack. Need to change this. 
 //analog pin
 const int CT_Sense = 0;
