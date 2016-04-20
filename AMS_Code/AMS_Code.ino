@@ -10,7 +10,8 @@
 /*TO DO: 
  * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
  * Test this code
-*/
+ * Move VoltageFix inside BalanceCheck? - optimization reasons
+ */
 
 //Use functions from given library
 #include "LTC68031.h"
@@ -195,18 +196,26 @@ void loop(){
     statflag = true;
   }
   
-  //----Read TS Current ----
+  //Read TS Current
   CT_value = analogRead(CT_Sense);
   TS_current = (CT_value - Offset) * inv_Gain;
   
   //Scheduled task for receiving cell voltages
   if(voltConvFlag && (millis() - conversiontime > 20)){
     ReceiveCells();
+    /* Timer is reset inside function calls
+     * Due to multiple operations happening before
+     * timer should be reset.
+     */
   }
   
   //Scheduled task for receiving temperatures
   if(tempConvFlag && (millis() - conversiontime > 5)){
     ReceiveTemps();
+    /* Timer is reset inside function calls
+     * Due to multiple operations happening before
+     * timer should be reset.
+     */
   }
   
   //CAN transmit/receive
@@ -228,7 +237,7 @@ void init_cfg(){                       // sets initial configuration for all ICs
 }
 
 //Initializes CAN interface
-CAN_Init(){
+void CAN_Init(){
   while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
   {
     #ifdef SER_EN
@@ -243,7 +252,7 @@ CAN_Init(){
 }
 
 //Initializes LTC chips
-LTC_Init(){
+void LTC_Init(){
   pinMode(HW_Enable, OUTPUT);
   digitalWrite(HW_Enable, HIGH);
   delay(15);
