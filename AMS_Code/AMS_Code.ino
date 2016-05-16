@@ -9,23 +9,25 @@
 
 /*TO DO: 
  * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
- * Test this code
- * Move VoltageFix inside BalanceCheck? - optimization reasons
+ * Test this code as found LTC chip problem before I got to. 
  */
 
 //Use functions from given library
 #include "LTC68031.h"
 #include "mcp_can.h"
-#include <math.h>
+#include "pin_defines.h"      //contains pin definitions
+#include "LT_consts.h"        //contains constants related to voltages and timing
+#include <math.h>             // Just need exp()
 #include <avr/wdt.h>
 
 #define WDT_EN 0              // For on-board watchdog. Need Optiboot bootloader though. 
-#define CAN_EN 0              // Comment this out for no CAN chip, ie for testing.
-#define SER_EN 0              // Comment this out for no Serial ie for in final car
-#define OLD_BAL 0             // Old balance code that works, no regen re-enable
-#define NEW_BAL 1             // New, more optimized balance code that should be faster and includes regen re-enable
+#define CAN_EN 0              // Enables CAN - set to zero for testing without CAN modules
+#define SER_EN 1              // Enables Serial, set to 0 for in final car. 
+#define CURR_FIX 0            // Enables fixing the cell voltages with current and pack ESR. Experimental. Fix ESR before enabling
 #define TOTAL_IC 3            // Number of ICs in the daisy chain
 
+
+//internal status flags
 bool cfg_flag = false;
 bool voltflag = false;
 bool statflag = false;
@@ -34,23 +36,17 @@ bool voltConvFlag = false;
 bool voltReceiveFlag = false;
 bool tempConvFlag = false;
 bool tempReceiveFlag = false;
+bool discharging = false;
 uint16_t CT_value = 0;
 int error;
 
-//----HW constants------
-//digital pins
-#define CAN_int 2
-#define WD_LED 3
-#define LTC_WDT 5
-#define Midpack 4
-#define HW_Enable 6
-#define AMS_Stat 7
-#define CAN_CS 9
-#define LTC6803_CS 10
-#define Beta 4250
-const float rinf = 100000*exp(-1*(Beta/298.15));
-unsigned long conversiontime; 
-unsigned long OWTime;
+//thermistor constants
+#define BETA 4250
+const float R_INF = 100000*exp(-1*(BETA/298.15));
+
+//LT variables, also some for CAN transmission
+unsigned long conversiontime_ms; 
+unsigned long Open_Wire_time_ms;
 uint16_t VoltMin;
 uint8_t VoltMinTrans;
 uint16_t VoltMax;
@@ -62,27 +58,12 @@ uint8_t MaxTempTrans;
 uint8_t FlagTrans;
 
 //----Current Transducer constants----
-//const float Gain = .004;         // for current transducer, in V/A
-const int inv_Gain = 250;         // *250 = /.004
-const int Offset = 512;        // 0 current offset, allows measurement in both directions. 
+#define INVERSE_GAIN 250     // 250A/V = 1/(.004 V/A), from Data sheet of DHAB CT
+#define CT_OFFSET 512        // 0 current offset, allows measurement in both directions. 
 int TS_current;
-const int ESR = 4;            // ESR of the entire pack. Need to change this. 
-//analog pin
-const int CT_Sense = 0;
+#define ESR 4            // ESR of the entire pack. Need to change this. 
 
-//----LT constants----
-//const float balance = 2.67;         // Balance Voltage - at this voltage send CAN message to stop regen
-const int balance = 3100;             // Balance Voltage (mV) - at this voltage send CAN message to stop regen
-//const float stopbalance = 2.6;      // Voltage to stop balancing at, can start regen again
-const int stopbalance = 2600;         // Voltage (mV) to stop balancing at, can start regen again
-//const float OV = 2.8;               // Voltage to shut down TS at
-const int OV = 3400;                  // Voltage (mV) to shut down TS at
-byte PEC = 0x00;
-#ifdef NEW_BAL
-  bool discharging = false;
-#endif
-
-//----CAN SHIELD STUFF----
+//----CAN INTERFACE STUFF----
 #ifdef CAN_EN
   MCP_CAN CAN(CAN_CS);
   unsigned char dataToSend[8];
@@ -92,6 +73,23 @@ byte PEC = 0x00;
   const unsigned long Receive_ID = 0x52;     
   const unsigned long Trans_ID = 0x51;
 #endif
+
+//function prototypes
+void init_cfg();                      // initializes config registers
+void CAN_Init();                      // initializes CAN interface
+void LTC_Init();                      // initializes LTC chips
+void CellConversionReq();             // requests cell voltage conversion from LTC chips
+void ReceiveCells();                  // receives cell voltages and computes all necessary values
+void TempConversionReq();             // requests temperature conversion from LTC chips
+void ReceiveTemps();                  // receives temperatures and computes all necessary values
+void CAN_Receive();                   // receives CAN message to enable midpack relay for charging
+void CAN_Trans();                     // transmits CAN messages to master controller
+void VoltToTemp();                    // fixes temp values to proper units
+inline void errorcheck(int error);    // checks PEC errors, shuts TS down if issue found
+void cfg_check();                     // copies LTC config to local values to ensure we know what's up
+uint8_t DCC_cell(uint8_t input);      // finds correct bit for discharge. possible move to header?
+uint16_t VoltageFix(uint16_t inputvoltage, int current);  // fixes voltage values from LTC chips
+void Balance_Check();                 // checks for balance/stop balance/etc conditions
 
 uint16_t cell_codes[TOTAL_IC][12] = {1}; 
 /*!< 
@@ -146,10 +144,10 @@ void setup() {
   #endif
   
   //Sets Arduino pin modes
-  pinMode(CAN_int, INPUT);
-  pinMode(LTC_WDT, INPUT);
-  pinMode(Midpack, OUTPUT);
-  digitalWrite(Midpack, LOW);
+  pinMode(CAN_RECEIVED_INTERRUPT, INPUT);
+  pinMode(WDT_INPUT_FR_LTC_CHIPS, INPUT);
+  pinMode(MIDPACK_RELAY, OUTPUT);
+  digitalWrite(MIDPACK_RELAY, LOW);
   pinMode(CAN_CS, OUTPUT);
   pinMode(LTC6803_CS, OUTPUT);
   digitalWrite(LTC6803_CS,HIGH);
@@ -163,19 +161,19 @@ void setup() {
   LTC_Init();                             
 
   //show ready to go
-  pinMode(AMS_Stat, OUTPUT);
+  pinMode(AMS_STATUS_OUTPUT, OUTPUT);
   statflag = true;
-  digitalWrite(AMS_Stat, HIGH);
-  pinMode(WD_LED, OUTPUT);
-  digitalWrite(WD_LED, LOW);
+  digitalWrite(AMS_STATUS_OUTPUT, HIGH);
+  pinMode(WD_LED_VISUAL, OUTPUT);
+  digitalWrite(WD_LED_VISUAL, LOW);
   #ifdef WDT_EN
     wdt_enable(WDTO_4S);
   #endif
   
   //Starts off the conversion chain
   CellConversionReq();
-  conversiontime = millis();
-  OWTime = conversiontime;
+  conversiontime_ms = millis();
+  Open_Wire_time_ms = conversiontime_ms;
   voltConvFlag = true;
 }
 
@@ -186,22 +184,28 @@ void loop(){
   #endif
   
   //check for LTC Watchdog reset
-  if(digitalRead(LTC_WDT) == LOW){
-    digitalWrite(AMS_Stat, LOW);
-    digitalWrite(WD_LED, HIGH);
+  if(digitalRead(WDT_INPUT_FR_LTC_CHIPS) == LOW){
+    digitalWrite(AMS_STATUS_OUTPUT, LOW);
+    digitalWrite(WD_LED_VISUAL, HIGH);
     statflag = false;
+#ifdef SER_EN
+    Serial.println("LTC watchdog timer event");
+#endif
   }else{
-    digitalWrite(WD_LED, LOW);
-    digitalWrite(AMS_Stat, HIGH);
+    digitalWrite(WD_LED_VISUAL, LOW);
+    digitalWrite(AMS_STATUS_OUTPUT, HIGH);
     statflag = true;
   }
   
   //Read TS Current
-  CT_value = analogRead(CT_Sense);
-  TS_current = (CT_value - Offset) * inv_Gain;
-  
+  CT_value = analogRead(CT_SENSE_PIN);
+  TS_current = (CT_value - CT_OFFSET) * INVERSE_GAIN;
+#ifdef SER_EN
+  Serial.print("TS Current: ");
+  Serial.println(TS_current);
+#endif
   //Scheduled task for receiving cell voltages
-  if(voltConvFlag && (millis() - conversiontime > 20)){
+  if(voltConvFlag && (millis() - conversiontime_ms > CELL_SENSE_TIME_ms)){
     ReceiveCells();
     /* Timer is reset inside function calls
      * Due to multiple operations happening before
@@ -210,7 +214,7 @@ void loop(){
   }
   
   //Scheduled task for receiving temperatures
-  if(tempConvFlag && (millis() - conversiontime > 5)){
+  if(tempConvFlag && (millis() - conversiontime_ms > TEMP_SENSE_TIME_ms)){
     ReceiveTemps();
     /* Timer is reset inside function calls
      * Due to multiple operations happening before
@@ -232,7 +236,7 @@ void init_cfg(){                       // sets initial configuration for all ICs
     tx_cfg[i][2] = 0xF0 ;
     tx_cfg[i][3] = 0xFF ; 
     tx_cfg[i][4] = 0x00 ;             //UnderVoltage value... Not applicable here. 
-    tx_cfg[i][5] = 0xAB ;             //OV set... Not usefull so set high. 
+    tx_cfg[i][5] = 0xAB ;             //OVERVOLTAGE_ERROR_mV set... Not usefull so set high. 
   }
 }
 
@@ -253,8 +257,8 @@ void CAN_Init(){
 
 //Initializes LTC chips
 void LTC_Init(){
-  pinMode(HW_Enable, OUTPUT);
-  digitalWrite(HW_Enable, HIGH);
+  pinMode(LTC_HW_ENABLE, OUTPUT);
+  digitalWrite(LTC_HW_ENABLE, HIGH);
   delay(15);
   // ---Initialize LTC chips
   LTC6803_initialize();                       //Initialize LTC6803 hardware - sets SPI to 1MHz
@@ -272,20 +276,20 @@ void LTC_Init(){
 //Request cell conversion from LTC chips 
 void CellConversionReq(){
   //----OpenWire detect?----
-  if(millis() - OWTime >=30000){
-    LTC6803_stowdc();     //START OPEN WIRE CONVERSION
-    OWTime = millis();
+  if(millis() - Open_Wire_time_ms >= OPEN_WIRE_TIMER_ms){
+    LTC6803_stowad();     //START OPEN WIRE CONVERSION
+    Open_Wire_time_ms = millis();
   } 
   else {
-    LTC6803_stcvdc();     //start cv conversion
+    LTC6803_stcvad();     //start cv conversion
   }
   voltConvFlag = true;
-  conversiontime = millis();
+  conversiontime_ms = millis();
 }
 
 /* Receive cell voltages
  * Fixes values from samples to volts by calling function
- * Check for balance conditions by calling proper function depending on new/old bal
+ * Check for START_BALANCE_VOLTAGE_mV conditions by calling proper function depending on new/old bal
  * Requests temp conversion
  */
 void ReceiveCells(){
@@ -293,18 +297,9 @@ void ReceiveCells(){
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
   errorcheck(error);
   voltConvFlag = false;
-  
-  //Fix values to true voltages
-  VoltageFix();
-  
-  //Check Balance/OV/Stop Balance conditions
-  #ifdef OLD_BAL
-    OVCheck();
-    StopBal();
-  #endif
-  #ifdef NEW_BAL
-    Balance_Check();
-  #endif
+   
+  //Find cell voltages/Check Balance/OverVoltage/Stop Balance conditions
+  Balance_Check();
   
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
@@ -322,7 +317,7 @@ void ReceiveCells(){
 void TempConversionReq(){
   LTC6803_sttmpad();      //start temp conversion 
   tempConvFlag = true; 
-  conversiontime = millis();
+  conversiontime_ms = millis();
 }
 
 /* Receive temperatures
@@ -342,24 +337,22 @@ void ReceiveTemps(){
 
 //Check for CAN Messages
 void CAN_Receive(){
-    len = 0;
-    if(CAN_MSGAVAIL == CAN.checkReceive()){
-          CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
-          //canID = CAN.getCanId();
-      }
-      
-    //sets midpack relay on for charging
-    //if(canID == Receive_ID){
-      if(inFromCAN[0] == 1){
-        digitalWrite(Midpack, HIGH);
-        chargeflag = true;
-      }
-      if(inFromCAN[0] == 0){
-        digitalWrite(Midpack, LOW);
-        chargeflag = false;
-      }
-    //}
-   
+  len = 0;
+  if(CAN_MSGAVAIL == CAN.checkReceive()){
+        CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
+        //canID = CAN.getCanId();
+    }
+    
+  //sets midpack relay on for charging
+  //if(canID == Receive_ID){
+  if(inFromCAN[0] == 1){
+    digitalWrite(MIDPACK_RELAY, HIGH);
+    chargeflag = true;
+  }
+  if(inFromCAN[0] == 0){
+    digitalWrite(MIDPACK_RELAY, LOW);
+    chargeflag = false;
+  }
 }
 
 // Transmit data over CAN
@@ -431,7 +424,7 @@ void VoltToTemp(){
         Serial.println(temps[ic_counter][cell_counter],4); //Samples to volts
       }*/
       temps[ic_counter][cell_counter] = 100000 * temps[ic_counter][cell_counter]/(3.0625 - temps[ic_counter][cell_counter]);    // Voltage to resistance, Ohms
-      temps[ic_counter][cell_counter] = (Beta/(log(temps[ic_counter][cell_counter]/rinf)))-273.15;                              //resistance to temp
+      temps[ic_counter][cell_counter] = (BETA/(log(temps[ic_counter][cell_counter]/R_INF)))-273.15;                              //resistance to temp
       MaxTemp = max(MaxTemp,temps[ic_counter][cell_counter]);
     }
   }
@@ -441,33 +434,11 @@ void VoltToTemp(){
 inline void errorcheck(int error){
   if(error != 0){
       Serial.println("PEC ERROR");
-      digitalWrite(AMS_Stat, LOW);
+      digitalWrite(AMS_STATUS_OUTPUT, LOW);
     }
 }
 
 //---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
-void VoltageFix(){
-  PackVoltage = 0;
-  VoltMin = 100;
-  VoltMax = 0;
-  for(int ic_counter = 0;ic_counter < TOTAL_IC;ic_counter++){
-    //Serial.print(ic_counter);
-    //Serial.print(" ");
-    for(int cell_counter = 0;cell_counter < 12;cell_counter++){
-      //Serial.print(cell_counter);
-      //Serial.print(" ");
-      voltages[ic_counter][cell_counter] = (cell_codes[ic_counter][cell_counter]) *15/10;       //chip reports with an offset, this gets actual voltage (mV)
-      //Serial.print(voltages[ic_counter][cell_counter]);
-      //Serial.print(" ");
-      //voltages[ic_counter][cell_counter] = voltages[ic_counter][cell_counter] - ESR*TS_current/36;       // removes bias from TS current and series resistance of pack
-      VoltMin = min(VoltMin, voltages[ic_counter][cell_counter]);       //calc min      
-      VoltMax = max(VoltMax, voltages[ic_counter][cell_counter]);       //calc max
-      PackVoltage += voltages[ic_counter][cell_counter];                //total pack
-    }
-    //Serial.print("\n");
-  }
-  //Serial.print("\n");
-}
 
 //----sets tx =rx so that we know for sure what the status is----
 void cfg_check(){
@@ -505,98 +476,68 @@ uint8_t DCC_cell(uint8_t input){
   }
 }
 
-#ifdef OLD_BAL
-  /*---- Checks for OV & balance conditions----
-  *If a cell voltage is higher than OV, shutdown Tractive system
-   */
-  void OVCheck(){
-    for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
-      for(int cv_counter = 0;cv_counter < 4;cv_counter++){          //Loop through all cells
-        if( voltages[ic_counter][cv_counter] > balance){
-          voltflag = true;                                          // stop regen
-          if( voltages[ic_counter][cv_counter] > OV) {              //if need to shutdown tractive system due to OV.
-            digitalWrite(AMS_Stat, LOW);
-            statflag = false;
-          }
-          if(cv_counter < 8){
-            tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
-            cfg_flag = true;
-          }else{
-            tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
-            cfg_flag = true;
-          }
-        }
-      }
-    }
-  }
-  
-  /*---- Checks for balance end conditions----
-   * If Tractive System was shut down, allow re-enable of reset circuit.
-   */
-  void StopBal(){
-    for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++) {  //Loop through all ICs
-      for(int cv_counter = 0;cv_counter < 4;cv_counter++){      //Loop through all cells
-        if(voltages[ic_counter][cv_counter] <= stopbalance){ 
-          if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter))){
-            tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
-            cfg_flag = true;
-          }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0)){
-            tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
-            cfg_flag = true;
-          }
-          if(!statflag){
-            statflag = true;
-            digitalWrite(AMS_Stat, HIGH);
-          }
-        }
-      }
-    }
-  }
+/* LT chips report cell voltages with an offset, fixes that. 
+ * Also takes current into consideration to fix cell voltages
+ */
+uint16_t VoltageFix(uint16_t inputvoltage, int current){
+  uint16_t outputVoltage = inputvoltage *15/10;       //chip reports with an offset, this gets actual voltage (mV)
+#ifdef CURR_FIX
+  outputVoltage = outputVoltage - ESR*current/36;       // removes bias from TS current and series resistance of pack
 #endif
+  return outputVoltage;
+}
 
-#ifdef NEW_BAL
-  void Balance_Check(){
-    for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
-      discharging = true;
-      for(int cv_counter = 0;cv_counter < 12;cv_counter++){          //Loop through all cells
+void Balance_Check(){
+  PackVoltage = 0;
+  VoltMin = 100;
+  VoltMax = 0;
+  for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
+    discharging = true;
+    for(int cv_counter = 0;cv_counter < 12;cv_counter++){          //Loop through all cells
+      
+      //get cell voltage first
+      voltages[ic_counter][cv_counter] = VoltageFix(cell_codes[ic_counter][cv_counter], TS_current);
+      
+      VoltMin = min(VoltMin, voltages[ic_counter][cv_counter]);       //calc min      
+      VoltMax = max(VoltMax, voltages[ic_counter][cv_counter]);       //calc max
+      PackVoltage += voltages[ic_counter][cv_counter];                //total pack
+
+      
       //over voltage checks
-        if( voltages[ic_counter][cv_counter] > balance){
-          voltflag = true;                                          // stop regen
-          if( voltages[ic_counter][cv_counter] > OV) {              //if need to shutdown tractive system due to OV.
-            digitalWrite(AMS_Stat, LOW);
-            statflag = false;
-          }
-          if(cv_counter < 8){
-            tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
-            cfg_flag = true;
-          }else{
-            tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
-            cfg_flag = true;
-          }
+      if(voltages[ic_counter][cv_counter] > START_BALANCE_VOLTAGE_mV){
+        voltflag = true;                                          // stop regen
+        if( voltages[ic_counter][cv_counter] > OVERVOLTAGE_ERROR_mV) {              //if need to shutdown tractive system due to OVERVOLTAGE_ERROR_mV.
+          digitalWrite(AMS_STATUS_OUTPUT, LOW);
+          statflag = false;
         }
-        
-  
-      //under voltage checks
-        if(voltages[ic_counter][cv_counter] <= stopbalance){ 
-          if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter))){
-            tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
-            cfg_flag = true;
-          }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0)){
-            tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
-            cfg_flag = true;
-          }
-          if(!statflag){
-            statflag = true;
-            digitalWrite(AMS_Stat, HIGH);
-          }
+        if(cv_counter < 8){
+          tx_cfg[ic_counter][1] |= DCC_cell(cv_counter);
+          cfg_flag = true;
+        }else{
+          tx_cfg[ic_counter][2] |= DCC_cell(cv_counter - 8);
+          cfg_flag = true;
         }
       }
-      if((tx_cfg[ic_counter][1] == 0x00) && ((tx_cfg[ic_counter][2] << 4) == 0x00)){
-        discharging = false;
+      
+
+    //under voltage checks
+      if(voltages[ic_counter][cv_counter] <= STOP_BALANCE_VOLTAGE_mV){ 
+        if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter))){
+          tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
+          cfg_flag = true;
+        }else if(cv_counter >= 8 && ((tx_cfg[ic_counter][2] & DCC_cell(cv_counter-8))==0)){
+          tx_cfg[ic_counter][2] = tx_cfg[ic_counter][2] ^ DCC_cell(cv_counter - 8);
+          cfg_flag = true;
+        }
+        if(!statflag){
+          statflag = true;
+          digitalWrite(AMS_STATUS_OUTPUT, HIGH);
+        }
       }
-      #ifdef SER_EN
-      #endif
+    }
+    if((tx_cfg[ic_counter][1] == 0x00) && ((tx_cfg[ic_counter][2] << 4) == 0x00)){
+      discharging = false;
     }
   }
-#endif
+}
 
