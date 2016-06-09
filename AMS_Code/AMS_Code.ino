@@ -137,12 +137,12 @@ void init_cfg(){                       // sets initial configuration for all ICs
 }
 
 void setup() { 
-  #ifdef WDT_EN
+#ifdef WDT_EN
     wdt_disable();
-  #endif
-  #ifdef SER_EN
+#endif
+#ifdef SER_EN
     Serial.begin(250000);
-  #endif
+#endif
   //Sets Arduino pin modes
   pinMode(CAN_int, INPUT);
   pinMode(WDT, INPUT);
@@ -154,20 +154,20 @@ void setup() {
   digitalWrite(LTC6803_CS,HIGH);
   
   //Initialize CAN interface
-  #ifdef CAN_EN
+#ifdef CAN_EN
     while (CAN_OK != CAN.begin(CAN_500KBPS))              // init can bus : baudrate = 500k
       {
-        #ifdef SER_EN
+#ifdef SER_EN
           Serial.println("CAN BUS Shield init fail");
           Serial.println(" Init CAN BUS Shield again");
           delay(200);
-        #endif
+#endif
       }
     //Serial.println("CAN BUS Shield init ok!");
     CAN.init_Mask(0, 0, 0xfff);                         // there are 2 mask in mcp2515, you need to set both of them
     CAN.init_Mask(1, 0, 0xfff);
     CAN.init_Filt(0, 0, Receive_ID);
-  #endif
+#endif
   // ---Turn on LTC Chips---
   pinMode(HW_Enable, OUTPUT);
   digitalWrite(HW_Enable, HIGH);
@@ -190,15 +190,15 @@ void setup() {
   digitalWrite(WD_Vis, LOW);
   conversiontime = millis();
   OWTime = conversiontime;
-  #ifdef WDT_EN
+#ifdef WDT_EN
     wdt_enable(WDTO_4S);
-  #endif
+#endif
 }
 
 void loop() {
-  #ifdef WDT_EN
+#ifdef WDT_EN
     wdt_reset();
-  #endif
+#endif
   if(digitalRead(WDT) == LOW){
     digitalWrite(AMS_Stat, LOW);
     digitalWrite(WD_Vis, HIGH);
@@ -230,13 +230,13 @@ void loop() {
   Can be placed below receiving new data for "proper" ness but it won't be as fast
   due to floating point math happening*/
   VoltageFix();
-  #ifdef OLD_BAL
+#ifdef OLD_BAL
     OVCheck();
     StopBal();
-  #endif
-  #ifdef NEW_BAL
+#endif
+#ifdef NEW_BAL
     Balance_Check();
-  #endif
+#endif
   VoltToTemp();
    
   //----Adjust registers if applicable---- - same as above group.
@@ -248,7 +248,7 @@ void loop() {
     cfg_flag = false;
   }
   // All CAN Operations
-  #ifdef CAN_EN
+#ifdef CAN_EN
 
     //Check for CAN Messages
     len = 0;
@@ -312,7 +312,7 @@ void loop() {
     dataToSend[6] = MaxTempTrans;
 
     CAN.sendMsgBuf(0x51, 0, 7, dataToSend);
-  #endif
+#endif
   
   //burns any remaining time for conversion
   while(millis()-conversiontime > 20){}                              
@@ -555,8 +555,8 @@ uint8_t DCC_cell(uint8_t input){
       if((tx_cfg[ic_counter][1] == 0x00) && ((tx_cfg[ic_counter][2] << 4) == 0x00)){
         discharging = false;
       }
-      #ifdef SER_EN
-      #endif
+#ifdef SER_EN
+#endif
     }
   }
 #endif
