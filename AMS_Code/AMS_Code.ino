@@ -1,15 +1,15 @@
 //Brandon AMS Start
-/* Requires the download of spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield 
- * 
+/* Requires the download of spi-can from here: http://www.seeedstudio.com/wiki/CAN-BUS_Shield
+ *
  * Constantly measures TS Current and sends over CAN.
- * 
- * Alternately requests cell voltages and temperatures 
+ *
+ * Alternately requests cell voltages and temperatures
  * Due to LTC chip limitations
 */
 
 /*TO DO: 
  * WRITE NEW BOOTLOADER TO NANO TO ENABLE WATCHDOG TIMER
- * Test this code as found LTC chip problem before I got to. 
+ * Test this code as found LTC chip problem before I got to.
  */
 
 //Use functions from given library
@@ -22,10 +22,9 @@
 
 #define WDT_EN 0              // For on-board watchdog. Need Optiboot bootloader though. 
 #define CAN_EN 0              // Enables CAN - set to zero for testing without CAN modules
-#define SER_EN 1              // Enables Serial, set to 0 for in final car. 
+#define SER_EN 1              // Enables Serial, set to 0 for in final car.
 #define CURR_FIX 0            // Enables fixing the cell voltages with current and pack ESR. Experimental. Fix ESR before enabling
 #define TOTAL_IC 3            // Number of ICs in the daisy chain
-
 
 //internal status flags
 bool cfg_flag = false;
@@ -45,7 +44,7 @@ int error;
 const float R_INF = 100000*exp(-1*(BETA/298.15));
 
 //LT variables, also some for CAN transmission
-unsigned long conversiontime_ms; 
+unsigned long conversiontime_ms;
 unsigned long Open_Wire_time_ms;
 uint16_t VoltMin;
 uint8_t VoltMinTrans;
@@ -59,9 +58,9 @@ uint8_t FlagTrans;
 
 //----Current Transducer constants----
 #define INVERSE_GAIN 250     // 250A/V = 1/(.004 V/A), from Data sheet of DHAB CT
-#define CT_OFFSET 512        // 0 current offset, allows measurement in both directions. 
+#define CT_OFFSET 512        // 0 current offset, allows measurement in both directions.
 int TS_current;
-#define ESR 4            // ESR of the entire pack. Need to change this. 
+#define ESR 4            // ESR of the entire pack. Need to change this.
 
 //----CAN INTERFACE STUFF----
 #ifdef CAN_EN
@@ -91,7 +90,7 @@ uint8_t DCC_cell(uint8_t input);      // finds correct bit for discharge. possib
 uint16_t VoltageFix(uint16_t inputvoltage, int current);  // fixes voltage values from LTC chips
 void Balance_Check();                 // checks for balance/stop balance/etc conditions
 
-uint16_t cell_codes[TOTAL_IC][12] = {1}; 
+uint16_t cell_codes[TOTAL_IC][12] = {1};
 /*!< 
   The cell codes will be stored in the cell_codes[][12] array in the following format:
   
@@ -136,13 +135,13 @@ uint8_t rx_cfg[TOTAL_IC][7];
 
 
 void setup() { 
-  #ifdef WDT_EN
+#ifdef WDT_EN
     wdt_disable();
-  #endif
-  #ifdef SER_EN
+#endif
+#ifdef SER_EN
     Serial.begin(250000);
-  #endif
-  
+#endif
+
   //Sets Arduino pin modes
   pinMode(CAN_RECEIVED_INTERRUPT, INPUT);
   pinMode(WDT_INPUT_FR_LTC_CHIPS, INPUT);
@@ -153,12 +152,12 @@ void setup() {
   digitalWrite(LTC6803_CS,HIGH);
   
   //Initialize CAN interface
-  #ifdef CAN_EN
+#ifdef CAN_EN
     CAN_Init();
-  #endif
-  
+#endif
+
   //Turn on LTC Chips
-  LTC_Init();                             
+  LTC_Init();
 
   //show ready to go
   pinMode(AMS_STATUS_OUTPUT, OUTPUT);
@@ -168,8 +167,8 @@ void setup() {
   digitalWrite(WD_LED_VISUAL, LOW);
   #ifdef WDT_EN
     wdt_enable(WDTO_4S);
-  #endif
-  
+#endif
+
   //Starts off the conversion chain
   CellConversionReq();
   conversiontime_ms = millis();
@@ -179,10 +178,10 @@ void setup() {
 
 void loop(){
   //reset local watchdog timer
-  #ifdef WDT_EN
+#ifdef WDT_EN
     wdt_reset();
-  #endif
-  
+#endif
+
   //check for LTC Watchdog reset
   if(digitalRead(WDT_INPUT_FR_LTC_CHIPS) == LOW){
     digitalWrite(AMS_STATUS_OUTPUT, LOW);
@@ -196,7 +195,7 @@ void loop(){
     digitalWrite(AMS_STATUS_OUTPUT, HIGH);
     statflag = true;
   }
-  
+
   //Read TS Current
   CT_value = analogRead(CT_SENSE_PIN);
   TS_current = (CT_value - CT_OFFSET) * INVERSE_GAIN;
@@ -212,7 +211,7 @@ void loop(){
      * timer should be reset.
      */
   }
-  
+
   //Scheduled task for receiving temperatures
   if(tempConvFlag && (millis() - conversiontime_ms > TEMP_SENSE_TIME_ms)){
     ReceiveTemps();
@@ -221,22 +220,22 @@ void loop(){
      * timer should be reset.
      */
   }
-  
+
   //CAN transmit/receive
-  #ifdef CAN_EN
+#ifdef CAN_EN
     CAN_Receive();
     CAN_Trans();
-  #endif
+#endif
 }
 
 void init_cfg(){                       // sets initial configuration for all ICs
   for(int i = 0; i<TOTAL_IC;i++){
     tx_cfg[i][0] = 0x91;
-    tx_cfg[i][1] = 0x00 ; 
+    tx_cfg[i][1] = 0x00 ;
     tx_cfg[i][2] = 0xF0 ;
-    tx_cfg[i][3] = 0xFF ; 
-    tx_cfg[i][4] = 0x00 ;             //UnderVoltage value... Not applicable here. 
-    tx_cfg[i][5] = 0xAB ;             //OVERVOLTAGE_ERROR_mV set... Not usefull so set high. 
+    tx_cfg[i][3] = 0xFF ;
+    tx_cfg[i][4] = 0x00 ;             //UnderVoltage value... Not applicable here.
+    tx_cfg[i][5] = 0xAB ;             //OVERVOLTAGE_ERROR_mV set... Not usefull so set high.
   }
 }
 
@@ -250,7 +249,7 @@ void CAN_Init(){
       delay(200);
     #endif
   }
-  CAN.init_Mask(0, 0, 0xfff);                         
+  CAN.init_Mask(0, 0, 0xfff);
   CAN.init_Mask(1, 0, 0xfff);
   CAN.init_Filt(0, 0, Receive_ID);
 }
@@ -266,14 +265,14 @@ void LTC_Init(){
   LTC6803_wrcfg(TOTAL_IC, tx_cfg);            //write cfg to chips
   error = LTC6803_rdcfg(TOTAL_IC, rx_cfg);    //read cfg register back
   errorcheck(error);                          //if PEC error, disable TS.
-  /*set tx = rx, ensures local copy is same as chip copy. 
+  /*set tx = rx, ensures local copy is same as chip copy.
    * Assumes LTC chips properly received data
    * Valid assumption due to above check
    */
-  cfg_check();   
+  cfg_check();
 }
 
-//Request cell conversion from LTC chips 
+//Request cell conversion from LTC chips
 void CellConversionReq(){
   //----OpenWire detect?----
   if(millis() - Open_Wire_time_ms >= OPEN_WIRE_TIMER_ms){
@@ -297,10 +296,10 @@ void ReceiveCells(){
   error = LTC6803_rdcv(TOTAL_IC, cell_codes);   //----Read Cell Voltage----
   errorcheck(error);
   voltConvFlag = false;
-   
+
   //Find cell voltages/Check Balance/OverVoltage/Stop Balance conditions
   Balance_Check();
-  
+
   //----Adjust registers if applicable---- - same as above group.
   if(cfg_flag){
     LTC6803_wrcfg(TOTAL_IC, tx_cfg);
@@ -315,8 +314,8 @@ void ReceiveCells(){
 
 //Request temp conversion from LTC chips
 void TempConversionReq(){
-  LTC6803_sttmpad();      //start temp conversion 
-  tempConvFlag = true; 
+  LTC6803_sttmpad();      //start temp conversion
+  tempConvFlag = true;
   conversiontime_ms = millis();
 }
 
@@ -342,7 +341,7 @@ void CAN_Receive(){
         CAN.readMsgBuf(&len, inFromCAN);    // read data,  len: data length, inFromCAN: data
         //canID = CAN.getCanId();
     }
-    
+
   //sets midpack relay on for charging
   //if(canID == Receive_ID){
   if(inFromCAN[0] == 1){
@@ -368,7 +367,7 @@ void CAN_Trans(){
       MaxTempTrans = uint8_t(MaxTemp);
       tempReceiveFlag = false;
   }
- 
+
   //Sets data for CAN transmision based on status flags
   if(statflag){
     FlagTrans |= 0x1;
@@ -385,11 +384,11 @@ void CAN_Trans(){
   }else{
     FlagTrans = FlagTrans & ~0x4;
   }
-  
+
   //report cell voltage, temp, and CT values over CAN
   dataToSend[0] = TS_current;
   dataToSend[1] = TS_current >> 8;
-  dataToSend[2] = FlagTrans;                
+  dataToSend[2] = FlagTrans;
   dataToSend[3] = VoltMaxTrans;
   dataToSend[4] = VoltMinTrans;
   dataToSend[5] = PackVoltageTrans;
@@ -438,7 +437,7 @@ inline void errorcheck(int error){
     }
 }
 
-//---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages---- 
+//---- LT chips report with an offset, fixes that. Also takes current into consideration to fix cell voltages----
 
 //----sets tx =rx so that we know for sure what the status is----
 void cfg_check(){
@@ -476,7 +475,7 @@ uint8_t DCC_cell(uint8_t input){
   }
 }
 
-/* LT chips report cell voltages with an offset, fixes that. 
+/* LT chips report cell voltages with an offset, fixes that.
  * Also takes current into consideration to fix cell voltages
  */
 uint16_t VoltageFix(uint16_t inputvoltage, int current){
@@ -494,15 +493,15 @@ void Balance_Check(){
   for(int ic_counter = 0;ic_counter<TOTAL_IC;ic_counter++){       //Loop through all ICs
     discharging = true;
     for(int cv_counter = 0;cv_counter < 12;cv_counter++){          //Loop through all cells
-      
+
       //get cell voltage first
       voltages[ic_counter][cv_counter] = VoltageFix(cell_codes[ic_counter][cv_counter], TS_current);
-      
-      VoltMin = min(VoltMin, voltages[ic_counter][cv_counter]);       //calc min      
+
+      VoltMin = min(VoltMin, voltages[ic_counter][cv_counter]);       //calc min
       VoltMax = max(VoltMax, voltages[ic_counter][cv_counter]);       //calc max
       PackVoltage += voltages[ic_counter][cv_counter];                //total pack
 
-      
+
       //over voltage checks
       if(voltages[ic_counter][cv_counter] > START_BALANCE_VOLTAGE_mV){
         voltflag = true;                                          // stop regen
@@ -518,10 +517,10 @@ void Balance_Check(){
           cfg_flag = true;
         }
       }
-      
+
 
     //under voltage checks
-      if(voltages[ic_counter][cv_counter] <= STOP_BALANCE_VOLTAGE_mV){ 
+      if(voltages[ic_counter][cv_counter] <= STOP_BALANCE_VOLTAGE_mV){
         if(cv_counter < 8 && (tx_cfg[ic_counter][1] & DCC_cell(cv_counter))){
           tx_cfg[ic_counter][1] ^= DCC_cell(cv_counter);
           cfg_flag = true;
