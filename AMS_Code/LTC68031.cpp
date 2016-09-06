@@ -294,6 +294,9 @@ int8_t LTC6803_rdtmp(uint8_t total_ic, uint16_t temp_codes[][3])
     {
       pec_error = -1;
     }
+	
+
+	
 
     temp = rx_data[data_counter++];
     temp2 = (rx_data[data_counter]& 0x0F)<<8;
@@ -304,6 +307,10 @@ int8_t LTC6803_rdtmp(uint8_t total_ic, uint16_t temp_codes[][3])
     temp2 = (rx_data[data_counter++]);
     temp =  (rx_data[data_counter++]& 0x0F)<<8;
     temp_codes[j][2] = temp+temp2 -512;
+	// if this works, the following increment skips over the PEC byte when doing the math/logic for cell values upon stacked 6803 chips.
+	// should realign the single dimension rx_data variable with the temp_codes two dimensional array. 	
+	// convienently forgotten about by Linear. 
+	data_counter++;
   }
   free(rx_data);
   return(pec_error);
@@ -346,6 +353,7 @@ uint8_t LTC6803_rdcv( uint8_t total_ic, uint16_t cell_codes[][12])
     {
       pec_error = -1;
     }
+	
 
     for (int k = 0; k<12; k=k+2)
     {
@@ -361,7 +369,10 @@ uint8_t LTC6803_rdcv( uint8_t total_ic, uint16_t cell_codes[][12])
 
       cell_codes[j][k+1] = temp+temp2 -512;
     }
-
+	// if this works, this skips over the PEC byte when doing the math/logic for cell values upon stacked 6803 chips. 
+	// should realign the single dimension rx_data variable with the cell_codes two dimensional array. 
+	// convienently forgotten about by Linear. 
+	data_counter++;
   }
   free(rx_data);
   return(pec_error);
