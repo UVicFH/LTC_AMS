@@ -62,9 +62,18 @@ void LTC6803_initialize();
 
 //! Function to start Cell Voltage measurement
 //! @return void
+void LTC6803_stcvad();
+
+//! Function to start Cell Voltage measurement, discharge enabled
+//! @return void
 void LTC6803_stcvdc();
 
-//Function to start Open Wire Cell Voltage measurement
+//! Function to start Open Wire Cell Voltage measurement
+//! @return void
+void LTC6803_stowad();
+
+//Function to start Open Wire Cell Voltage measurement, discharge enabled
+//! @return void
 void LTC6803_stowdc();
 
 //! Function to start Temp channel voltage measurement
